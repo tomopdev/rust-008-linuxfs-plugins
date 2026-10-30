@@ -556,7 +556,7 @@ fn sha_of(p: &Path) -> String {
 // tests
 // ---------------------------------------------------------------------------
 
-const EXTENSIONS: &str = "btrfs;img;raw;dd;linuxfsdev";
+const EXTENSIONS: &str = "btrfs;ext2;ext3;ext4;img;raw;dd;linuxfsdev";
 
 #[test]
 fn entry_points_and_connect() {
@@ -730,14 +730,14 @@ fn list_multi_volume_puts_dirs_before_their_files() {
 }
 
 #[test]
-fn list_rejects_non_btrfs_with_message() {
+fn list_rejects_unknown_data_with_message() {
     let dir = temp_dir();
     let junk = dir.join("junk.img");
     fs::write(&junk, vec![7u8; 300_000]).unwrap();
     let _ = take_messages();
     let (r, _d) = list(&junk);
     assert_eq!(r, FALSE);
-    assert!(take_messages().iter().any(|m| m.contains("no btrfs")));
+    assert!(take_messages().iter().any(|m| m.contains("no supported file system")));
     fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -978,5 +978,69 @@ fn devlink_selects_a_subvolume() {
         !d.adds.iter().any(|a| a.name == "hello.txt"),
         "only the chosen subvolume is shown"
     );
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn ext4_is_listed_and_unpacked() {
+    let dir = temp_dir();
+    let img = unpack_image(&dir, "ext4");
+    let _ = take_messages();
+    let (r, d) = list(&img);
+    assert_eq!(r, TRUE);
+    assert!(take_messages().is_empty(), "an intact volume reports nothing");
+    assert!(d.adds.iter().any(|a| !a.is_dir && a.name == "!EXT4-INFO.txt"));
+    assert!(d.adds.iter().any(|a| a.is_dir && a.name == "deep"));
+    let hello = d.adds.iter().find(|a| a.name == "hello.txt").unwrap();
+    assert_eq!(hello.size, 12);
+
+    let out = dir.join("out");
+    fs::create_dir_all(&out).unwrap();
+    let mut ops = MockOps::new();
+    let items = [("hello.txt", false, 12), ("big.bin", false, 1_500_000), ("link-rel", false, 9)];
+    assert_eq!(unpack(&img, &out, "", &items, &mut ops), TRUE);
+    assert_eq!(fs::read(out.join("hello.txt")).unwrap(), b"Hello, ext!\n");
+    assert_eq!(sha_of(&out.join("big.bin")), manifest_sha("ext4", "big.bin"));
+    assert_eq!(fs::read(out.join("link-rel")).unwrap(), b"hello.txt");
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Obecný princip: výpis i rozbalení pokračují po chybě a na konci je shrnutí v okně i v textovém souboru.
+#[test]
+fn damaged_volume_lists_everything_readable_and_reports_what_failed() {
+    let dir = temp_dir();
+    let img = unpack_image(&dir, "ext4-damaged");
+    let _ = take_messages();
+    let (r, d) = list(&img);
+    assert_eq!(r, TRUE);
+    assert!(d.adds.len() > 1500, "{}", d.adds.len());
+    let msgs = take_messages();
+    assert_eq!(msgs.len(), 1, "{msgs:?}");
+    assert!(msgs[0].contains("problems") && msgs[0].contains("many: ") && msgs[0].contains("Full list:"), "{}", msgs[0]);
+    let log = std::env::temp_dir().join("linuxfs-errors-list.txt");
+    let text = String::from_utf8_lossy(&fs::read(&log).unwrap()).into_owned();
+    assert!(text.contains("big.bin") && text.contains("Case.txt") && text.contains("deep\\level1\\level2\\level3"), "{text}");
+
+    // rozbalení: dva soubory jsou rozbité, třetí se rozbalí; uživatel odpovídá „přeskočit“ (Yes)
+    let out = dir.join("out");
+    fs::create_dir_all(&out).unwrap();
+    set_answer(Answer::Yes);
+    let mut ops = MockOps::new();
+    let items = [
+        ("big.bin", false, 1_500_000),
+        ("hello.txt", false, 12),
+        ("names\\Case.txt", false, 13),
+        ("names", true, 0),
+    ];
+    assert_eq!(unpack(&img, &out, "", &items, &mut ops), TRUE);
+    assert_eq!(fs::read(out.join("hello.txt")).unwrap(), b"Hello, ext!\n");
+    assert!(!out.join("big.bin").exists() && !out.join("names/Case.txt").exists());
+    let msgs = take_messages();
+    let questions = msgs.iter().filter(|m| m.contains("Cannot unpack")).count();
+    assert_eq!(questions, 2, "{msgs:?}");
+    let summary = msgs.last().unwrap();
+    assert!(summary.starts_with("2 problems") && summary.contains("big.bin") && summary.contains("Full list:"), "{summary}");
+    let log = std::env::temp_dir().join("linuxfs-errors-unpack.txt");
+    assert!(String::from_utf8_lossy(&fs::read(&log).unwrap()).contains("Case.txt"));
     fs::remove_dir_all(&dir).unwrap();
 }

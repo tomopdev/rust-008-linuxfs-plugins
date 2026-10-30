@@ -1,6 +1,6 @@
 [package]
 name = "linuxfs-wcx"
-description = "linuxfs-plugins: Total Commander WCX plugin, read-only přístup k souborovým systémům Linuxu (btrfs) v obrazech, oddílech a discích (64 bit)"
+description = "linuxfs-plugins: Total Commander WCX plugin, read-only přístup k souborovým systémům Linuxu (btrfs, ext2/3/4) v obrazech, oddílech a discích (64 bit)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,7 +15,7 @@ crate-type = ["cdylib", "rlib"]
 linuxfs-core.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys.workspace = true
+windows-sys = { workspace = true, features = ["Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 flate2.workspace = true

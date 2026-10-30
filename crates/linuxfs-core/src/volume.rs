@@ -1,4 +1,4 @@
-//! Jednotný pohled na jeden svazek Linuxu (zatím btrfs), aby pluginy nemusely řešit, o který souborový systém jde.
+//! Jednotný pohled na jeden svazek Linuxu (btrfs, ext2/3/4), aby pluginy nemusely řešit, o který souborový systém jde.
 //!
 //! Položky se adresují číslem ([`NodeId`]: strom + inode), ne cestou: názvy souborů v Linuxu jsou libovolné bajty
 //! a po převodu do Unicode (a po očistě pro Windows) by se podle nich položka nedala spolehlivě najít.
@@ -8,11 +8,30 @@ use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 
 use crate::btrfs::{BtrfsVolume, SubvolSelect};
+use crate::ext::ExtVolume;
 use crate::detect::{FsKind, Part};
 use crate::source::{DiskSource, Slice};
 
-/// Virtuální soubor v kořeni svazku s popisem souborového systému a seznamem podsvazků.
+/// Virtuální soubor v kořeni svazku btrfs s popisem souborového systému a seznamem podsvazků (u ext viz [`info_name_for`]).
 pub const INFO_NAME: &str = "!BTRFS-INFO.txt";
+
+/// Jméno virtuálního informačního souboru podle druhu souborového systému.
+pub fn info_name_for(kind: FsKind) -> &'static str {
+    match kind {
+        FsKind::Btrfs => INFO_NAME,
+        FsKind::Ext2 => "!EXT2-INFO.txt",
+        FsKind::Ext3 => "!EXT3-INFO.txt",
+        FsKind::Ext4 => "!EXT4-INFO.txt",
+    }
+}
+
+/// Výpis adresáře: položky a upozornění na to, co se nepodařilo přečíst (nečitelné položky se nevynechávají potichu).
+#[derive(Debug, Default)]
+pub struct Listing {
+    pub nodes: Vec<Node>,
+    /// Texty bez cesty adresáře (tu zná volající).
+    pub warnings: Vec<String>,
+}
 
 /// Adresa položky ve svazku: strom (u btrfs podsvazek) a číslo inode v něm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -89,6 +108,7 @@ impl From<io::Error> for VolumeError {
 
 enum Fs {
     Btrfs(Box<BtrfsVolume>),
+    Ext(Box<ExtVolume>),
 }
 
 pub struct LinuxVolume {
@@ -111,13 +131,14 @@ impl LinuxVolume {
     pub fn root(&self) -> NodeId {
         match &self.fs {
             Fs::Btrfs(v) => v.root(),
+            Fs::Ext(v) => v.root(),
         }
     }
 
     /// Uzel virtuálního informačního souboru.
     pub fn info_node(&self) -> Node {
         Node {
-            name: INFO_NAME.to_string(),
+            name: info_name_for(self.kind).to_string(),
             kind: NodeKind::File,
             size: self.info_text().len() as u64,
             mtime: None,
@@ -133,18 +154,29 @@ impl LinuxVolume {
     fn info_text(&self) -> &str {
         match &self.fs {
             Fs::Btrfs(v) => v.info_text(),
+            Fs::Ext(v) => v.info_text(),
         }
     }
 
     /// Položky adresáře; kořen navíc obsahuje virtuální [`INFO_NAME`].
     pub fn list_directory(&mut self, dir: NodeId) -> Result<Vec<Node>, VolumeError> {
-        let mut nodes = match &mut self.fs {
-            Fs::Btrfs(v) => v.list_directory(dir)?,
+        Ok(self.list_directory_ex(dir)?.nodes)
+    }
+
+    /// Jako [`LinuxVolume::list_directory`], ale s upozorněními na položky, které se nepodařilo přečíst.
+    pub fn list_directory_ex(&mut self, dir: NodeId) -> Result<Listing, VolumeError> {
+        let mut l = match &mut self.fs {
+            Fs::Btrfs(v) => {
+                let mut warnings = Vec::new();
+                let nodes = v.list_directory_with_warnings(dir, &mut warnings)?;
+                Listing { nodes, warnings }
+            }
+            Fs::Ext(v) => v.list_directory(dir)?,
         };
         if dir == self.root() {
-            nodes.push(self.info_node());
+            l.nodes.push(self.info_node());
         }
-        Ok(nodes)
+        Ok(l)
     }
 
     /// Pošle obsah souboru do `out` (virtuální soubor se vygeneruje).
@@ -156,6 +188,7 @@ impl LinuxVolume {
         }
         match &mut self.fs {
             Fs::Btrfs(v) => v.read_file_to(id, out),
+            Fs::Ext(v) => v.read_file_to(id, out),
         }
     }
 }
@@ -172,9 +205,18 @@ pub fn open_part(
     part: &Part,
     select: &SubvolSelect,
 ) -> Result<LinuxVolume, VolumeError> {
-    let slice = Slice::new(src.clone(), part.start, part.len);
     match part.kind {
+        FsKind::Ext2 | FsKind::Ext3 | FsKind::Ext4 => {
+            let v = ExtVolume::open(src, part.start, part.len)?;
+            let name = v.label().to_string();
+            Ok(LinuxVolume {
+                kind: v.kind(),
+                fs: Fs::Ext(Box::new(v)),
+                name,
+            })
+        }
         FsKind::Btrfs => {
+            let slice = Slice::new(src.clone(), part.start, part.len);
             let v = BtrfsVolume::open(slice, select)?;
             let name = v.label().to_string();
             Ok(LinuxVolume {
@@ -186,14 +228,22 @@ pub fn open_part(
     }
 }
 
+/// Výsledek otevření všech oddílů: otevřené svazky a hlášení o těch, které se otevřít nepodařilo.
+pub struct OpenedSet {
+    pub volumes: Vec<OpenedVolume>,
+    /// `(označení oddílu, text chyby)` pro oddíly, které se přeskočily.
+    pub failed: Vec<(String, String)>,
+}
+
 /// Otevře všechny svazky všech oddílů a každému dá jméno složky (`Partition 2 - jmenovka`). Oddíly, které nejdou
-/// otevřít, se přeskočí; první chyba se vrátí, jen když nejde otevřít vůbec nic.
-pub fn open_all(
+/// otevřít, se přeskočí a vrátí se v [`OpenedSet::failed`]; chyba se vrátí, jen když nejde otevřít vůbec nic.
+pub fn open_all_report(
     src: &Arc<Mutex<DiskSource>>,
     parts: &[Part],
     select: &SubvolSelect,
-) -> Result<Vec<OpenedVolume>, VolumeError> {
-    let mut out = Vec::new();
+) -> Result<OpenedSet, VolumeError> {
+    let mut volumes = Vec::new();
+    let mut failed = Vec::new();
     let mut first_err = None;
     for (i, p) in parts.iter().enumerate() {
         match open_part(src, p, select) {
@@ -208,15 +258,28 @@ pub fn open_all(
                 } else {
                     format!("Partition {} - {}", i + 1, tag)
                 };
-                out.push(OpenedVolume { label, vol });
+                volumes.push(OpenedVolume { label, vol });
             }
             Err(e) => {
+                failed.push((
+                    format!("Partition {} ({})", i + 1, p.kind.name()),
+                    e.to_string(),
+                ));
                 first_err.get_or_insert(e);
             }
         }
     }
-    if out.is_empty() {
+    if volumes.is_empty() {
         return Err(first_err.unwrap_or_else(|| VolumeError::Format("no volume".into())));
     }
-    Ok(out)
+    Ok(OpenedSet { volumes, failed })
+}
+
+/// Jako [`open_all_report`], ale bez hlášení o přeskočených oddílech.
+pub fn open_all(
+    src: &Arc<Mutex<DiskSource>>,
+    parts: &[Part],
+    select: &SubvolSelect,
+) -> Result<Vec<OpenedVolume>, VolumeError> {
+    Ok(open_all_report(src, parts, select)?.volumes)
 }

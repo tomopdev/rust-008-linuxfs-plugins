@@ -39,7 +39,7 @@ impl fmt::Display for OpenError {
                 "cannot open the source: {e} (raw disks need Salamander run as administrator)"
             ),
             OpenError::Config(m) => write!(f, "invalid .linuxfsdev file: {m}"),
-            OpenError::NoVolume => write!(f, "no btrfs file system found"),
+            OpenError::NoVolume => write!(f, "no supported file system (btrfs, ext2/3/4) found"),
             OpenError::Fs(e) => write!(f, "cannot read the file system: {e}"),
         }
     }
@@ -87,6 +87,8 @@ pub struct Resolved {
 }
 
 pub struct Container {
+    /// Partitions that were skipped because they did not open: `(partition, error)`.
+    pub open_failures: Vec<(String, String)>,
     vols: Vec<LinuxVolume>,
     /// Panel / real name of every volume's folder in the virtual root (multi-volume case only).
     folders: Vec<(String, String)>,
@@ -103,9 +105,10 @@ impl Container {
             return Err(OpenError::NoVolume);
         }
         let src = Arc::new(Mutex::new(src));
-        let opened = volume::open_all(&src, &parts, &select).map_err(OpenError::Fs)?;
+        let set = volume::open_all_report(&src, &parts, &select).map_err(OpenError::Fs)?;
+        let open_failures = set.failed;
         let (labels, vols): (Vec<String>, Vec<LinuxVolume>) =
-            opened.into_iter().map(|o| (o.label, o.vol)).unzip();
+            set.volumes.into_iter().map(|o| (o.label, o.vol)).unzip();
 
         // folder names of the virtual root (several volumes only)
         let mut folders = Vec::new();
@@ -121,6 +124,7 @@ impl Container {
             }
         }
         Ok(Container {
+            open_failures,
             vols,
             folders,
             cache: HashMap::new(),
@@ -146,19 +150,24 @@ impl Container {
         if let Some(hit) = self.cache.get(node) {
             return Ok(hit.clone());
         }
-        let items = Rc::new(self.build(node)?);
+        let items = Rc::new(self.build(node)?.0);
         self.cache.insert(node.clone(), items.clone());
         Ok(items)
     }
 
     pub fn list_uncached(&mut self, node: &Node) -> Result<Vec<Item>, VolumeError> {
+        Ok(self.build(node)?.0)
+    }
+
+    /// Like [`Container::list_uncached`], plus warnings about entries the volume could not read.
+    pub fn list_with_warnings(&mut self, node: &Node) -> Result<(Vec<Item>, Vec<String>), VolumeError> {
         self.build(node)
     }
 
-    fn build(&mut self, node: &Node) -> Result<Vec<Item>, VolumeError> {
+    fn build(&mut self, node: &Node) -> Result<(Vec<Item>, Vec<String>), VolumeError> {
         let Some(vol) = node.vol else {
             // virtual root: one folder per volume
-            return Ok(self
+            return Ok((self
                 .folders
                 .iter()
                 .enumerate()
@@ -172,14 +181,16 @@ impl Container {
                     size: 0,
                     mtime: None,
                 })
-                .collect());
+                .collect(), Vec::new()));
         };
 
-        let mut list: Vec<VolNode> = self.vols[vol].list_directory(node.id)?;
+        let listing = self.vols[vol].list_directory_ex(node.id)?;
+        let warnings = listing.warnings;
+        let mut list: Vec<VolNode> = listing.nodes;
         list.sort_by_cached_key(|d| d.name.to_lowercase());
         let mut real = NameSet::default();
         let mut disp = NameSet::default();
-        Ok(list
+        let items = list
             .into_iter()
             .map(|d| {
                 let base = util::sanitize_component(&d.name);
@@ -195,7 +206,8 @@ impl Container {
                     mtime: d.mtime,
                 }
             })
-            .collect())
+            .collect();
+        Ok((items, warnings))
     }
 
     /// Map a panel path (`\` separated, as shown in the panel) to its item.

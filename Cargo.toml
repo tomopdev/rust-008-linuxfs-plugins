@@ -1,14 +1,14 @@
-# linuxfs-plugins – pluginy pro souborové manažery (Total Commander, Altap/Open Salamander) pro souborové systémy Linuxu: btrfs (jen čtení, včetně podsvazků a komprese zlib/LZO/zstd), další přibudou.
+# linuxfs-plugins – pluginy pro souborové manažery (Total Commander, Altap/Open Salamander) pro souborové systémy Linuxu: btrfs (podsvazky, komprese zlib/LZO/zstd) a ext2/3/4, jen čtení.
 [workspace]
 resolver = "3"
 members = ["crates/linuxfs-core", "crates/linuxfs-wcx", "crates/linuxfs-spl"]
-exclude = ["vendor/btrfs-disk"] # upstream crate s lokálními patchi (viz PATCHES.md v adresáři), není členem workspace
+exclude = ["vendor/btrfs-disk", "vendor/ext4-view"] # upstream crates s lokálními patchi (viz PATCHES.md v adresářích), nejsou členy workspace
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.97"
-license = "GPL-3.0-or-later"
+license = "MIT OR Apache-2.0"
 publish = false
 
 [workspace.dependencies]
@@ -16,6 +16,7 @@ btrfs-disk = { path = "vendor/btrfs-disk", version = "=0.13.0" } # parser on-dis
 # dekomprese extentů btrfs: zlib (flate2, čistý Rust), zstd (ruzstd, čistý Rust); LZO je v linuxfs-core/src/lzo.rs
 flate2 = "1"
 ruzstd = "0.9"
+ext4-view = { path = "vendor/ext4-view", version = "=1.0.0", default-features = false } # ext2/3/4 jen pro čtení (MIT OR Apache-2.0, no_std, bez unsafe), s lokální opravou, viz vendor/ext4-view/PATCHES.md
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_IO",

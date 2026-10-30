@@ -10,15 +10,16 @@ use std::ptr::{self, null, null_mut};
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::container::{Container, Item, OpenError};
+use linuxfs_core::report::ProblemLog;
 use linuxfs_core::volume::VolumeError;
 use crate::spl::*;
 use crate::util;
 use crate::win::{self, Answer, Kind};
 
-pub const PLUGIN_NAME: &str = "LinuxFS (btrfs)";
+pub const PLUGIN_NAME: &str = "LinuxFS (btrfs, ext2/3/4)";
 /// Přípony, podle kterých Salamander pozná archivy tohoto pluginu (obsah se neprohledává).
-const EXTENSIONS: &CStr = c"btrfs;img;raw;dd;linuxfsdev";
-const ABOUT_TEXT: &str = "LinuxFS: read-only archiver plugin for Linux file systems. Currently btrfs, including subvolumes and snapshots (shown as folders of the top-level volume) and transparent zlib / LZO / zstd compression, on disk images, partitions and whole GPT / MBR disks.\n\nWritten in Rust on top of the btrfs-disk crate (MIT OR Apache-2.0); LZO and the layer that walks the B-trees are part of the plugin.\n\nThe file '!BTRFS-INFO.txt' in the root of the volume describes the file system and lists its subvolumes. Symbolic links are shown as small files with the link target; FIFOs, sockets and device nodes are not shown. Data checksums are not verified.\n\nOpens disk images and raw partitions; use a *.linuxfsdev link file for physical disks and to choose a subvolume (see README).";
+const EXTENSIONS: &CStr = c"btrfs;ext2;ext3;ext4;img;raw;dd;linuxfsdev";
+const ABOUT_TEXT: &str = "LinuxFS: read-only archiver plugin for Linux file systems: btrfs (subvolumes and snapshots shown as folders of the top-level volume, transparent zlib / LZO / zstd compression) and ext2 / ext3 / ext4, on disk images, partitions and whole GPT / MBR disks.\n\nWritten in Rust on top of the btrfs-disk and ext4-view crates (MIT OR Apache-2.0); LZO and the layer that walks the B-trees are part of the plugin.\n\nThe file '!BTRFS-INFO.txt' ('!EXT4-INFO.txt' ...) in the root of the volume describes the file system. If something cannot be read, the plugin carries on with the rest and shows what failed in a message and in a text file in the temp folder. Symbolic links are shown as small files with the link target; FIFOs, sockets and device nodes are not shown. Data checksums are not verified.\n\nOpens disk images and raw partitions; use a *.linuxfsdev link file for physical disks and to choose a subvolume (see README).";
 
 /// `CSalamanderGeneralAbstract*` received in `SalamanderPluginEntry`.
 pub static GENERAL: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
@@ -213,7 +214,7 @@ fn open_container(arc: &str, parent: HWND) -> Option<Container> {
         Ok(c) => Some(c),
         Err(e) => {
             let hint = if matches!(e, OpenError::NoVolume) {
-                "\n\nSalamander opens files by extension; the file must contain a btrfs file system (directly, or on a GPT / MBR disk)."
+                "\n\nSalamander opens files by extension; the file must contain a btrfs or ext2/3/4 file system (directly, or on a GPT / MBR disk)."
             } else {
                 ""
             };
@@ -303,12 +304,16 @@ unsafe extern "system" fn a_list(
 
             let mut stack = vec![(c.root(), String::new())];
             let mut first = true;
-            let mut skipped: Vec<String> = Vec::new();
+            // Everything that could not be listed: the walk always continues, the list is shown at the end.
+            let mut problems = ProblemLog::default();
+            for (place, msg) in &c.open_failures {
+                problems.add(place.clone(), format!("the volume was skipped, it could not be opened: {msg}"));
+            }
             while let Some((node, prefix)) = stack.pop() {
-                let listed = catch_unwind(AssertUnwindSafe(|| c.list_uncached(&node)))
+                let listed = catch_unwind(AssertUnwindSafe(|| c.list_with_warnings(&node)))
                     .unwrap_or_else(|p| Err(VolumeError::Format(format!("internal error: {}", panic_text(&*p)))));
-                let items = match listed {
-                    Ok(i) => i,
+                let (items, warnings) = match listed {
+                    Ok(l) => l,
                     Err(e) if first => {
                         show(
                             parent,
@@ -319,16 +324,21 @@ unsafe extern "system" fn a_list(
                         return FALSE;
                     }
                     Err(e) => {
-                        skipped.push(format!("\\{}: {e}", prefix));
+                        problems.add(prefix.clone(), format!("the directory could not be listed, its contents are missing: {e}"));
                         continue;
                     }
                 };
                 first = false;
+                problems.add_warnings(&prefix, warnings);
                 let parent_path = cstring(&prefix);
                 for it in &items {
                     if !add_item(dir, &parent_path, it) {
-                        // Salamander položku odmítl (nepřijatelné jméno, příliš dlouhá cesta, ...): přeskočit i s obsahem.
-                        skipped.push(format!("\\{}: the host refused '{}'", prefix, it.disp));
+                        // Salamander refused the item (unacceptable name, path of about 260 characters or more, ...):
+                        // it is skipped together with its contents and reported.
+                        problems.add(
+                            join_panel(&prefix, &it.disp),
+                            "refused by Salamander (path of about 260 characters or more, or a name it does not accept); skipped with its contents",
+                        );
                         continue;
                     }
                     if it.is_dir {
@@ -336,26 +346,10 @@ unsafe extern "system" fn a_list(
                     }
                 }
             }
-            if !skipped.is_empty() {
-                // Úplný seznam do souboru (okno zprávy je krátké a Salamander z něj text nevybere jinak než Ctrl+C).
-                let log = std::env::temp_dir().join("linuxfs-skipped.txt");
-                let saved = fs::write(&log, skipped.join("\r\n")).is_ok();
-                let mut text = format!(
-                    "{} item{} could not be listed and {} skipped (the host refuses paths of about 260 characters or more, or a name it does not accept):\n",
-                    skipped.len(),
-                    if skipped.len() == 1 { "" } else { "s" },
-                    if skipped.len() == 1 { "was" } else { "were" }
-                );
-                for line in skipped.iter().take(3) {
-                    text.push_str(&format!("\n{line}"));
-                }
-                if skipped.len() > 3 {
-                    text.push_str(&format!("\n... and {} more", skipped.len() - 3));
-                }
-                if saved {
-                    text.push_str(&format!("\n\nFull list: {}", log.display()));
-                }
-                text.push_str("\n(Ctrl+C copies this text.)");
+            if !problems.is_empty() {
+                // The message box is short; the complete list goes to a text file.
+                let log = problems.write_file("list", "problems while listing the archive", &arc);
+                let text = problems.window_text("occurred while listing; the rest of the volume is shown", log.as_deref());
                 show(parent, Kind::Warning, &text);
             }
             TRUE
@@ -391,6 +385,10 @@ struct Extractor {
     skip_errors: bool,
     /// Single-file mode (view/edit): errors are reported once and abort.
     single: bool,
+    /// Name of the opened archive (for the header of the report file).
+    arc: String,
+    /// Every item that could not be unpacked, whatever the user answered (shown and saved at the end).
+    problems: ProblemLog,
 }
 
 /// Writer that feeds the destination file and reports progress to Salamander.
@@ -525,11 +523,14 @@ impl Extractor {
     }
 
     fn on_error(&mut self, shown: &str, msg: &str) -> Outcome {
+        self.problems.add(shown, msg);
         if self.single {
+            let log = self.problems.write_file("unpack", "problems while extracting", &self.arc);
+            let more = log.map(|l| format!("\n\nDetails: {}", l.display())).unwrap_or_default();
             show(
                 self.dialog_parent(),
                 Kind::Error,
-                &format!("Cannot unpack '{shown}':\n{msg}"),
+                &format!("Cannot unpack '{shown}':\n{msg}{more}"),
             );
             return Outcome::Cancelled;
         }
@@ -608,6 +609,8 @@ unsafe extern "system" fn a_unpack_archive(
                 overwrite: Overwrite::Ask,
                 skip_errors: false,
                 single: false,
+                arc: arc.clone(),
+                problems: ProblemLog::default(),
             };
             let root_depth = root.split('\\').filter(|s| !s.is_empty()).count();
             let mut ok = true;
@@ -651,7 +654,9 @@ unsafe extern "system" fn a_unpack_archive(
                     dest.push(comp);
                 }
                 if item.is_dir {
-                    let _ = fs::create_dir_all(util::long_path(dest));
+                    if let Err(e) = fs::create_dir_all(util::long_path(dest.clone())) {
+                        ex.problems.add(&rel, format!("cannot create the folder {}: {e}", dest.display()));
+                    }
                     if !ex.add_progress(1) {
                         ok = false;
                         break;
@@ -662,6 +667,11 @@ unsafe extern "system" fn a_unpack_archive(
                 }
             }
             ops_call(ops, |v| (v.CloseProgressDialog)(ops));
+            if !ex.problems.is_empty() {
+                let log = ex.problems.write_file("unpack", "problems while extracting", &arc);
+                let text = ex.problems.window_text("occurred while extracting; the other files were processed", log.as_deref());
+                show(parent, Kind::Warning, &text);
+            }
             if ok { TRUE } else { FALSE }
         }
     })
@@ -722,6 +732,8 @@ unsafe extern "system" fn a_unpack_one(
                 overwrite: Overwrite::All,
                 skip_errors: false,
                 single: true,
+                arc: arc.clone(),
+                problems: ProblemLog::default(),
             };
             let outcome = ex.extract(&item, &name, dest.clone());
             ops_call(ops, |v| (v.CloseProgressDialog)(ops));
@@ -831,11 +843,11 @@ pub unsafe fn plugin_entry(entry: *mut Entry) -> *mut c_void {
             GENERAL.store((vt.GetSalamanderGeneral)(entry), Ordering::Release);
             let ok = (vt.SetBasicPluginData)(
                 entry,
-                c"LinuxFS (btrfs)".as_ptr(),
+                c"LinuxFS (btrfs, ext2/3/4)".as_ptr(),
                 FUNCTION_PANELARCHIVERVIEW,
                 c"0.1.0".as_ptr(),
-                c"GPL-3.0-or-later; btrfs-disk crate (rustutils) is MIT OR Apache-2.0".as_ptr(),
-                c"Opens btrfs file systems (subvolumes, zlib / LZO / zstd compression) on disk images, partitions and disks (read-only).".as_ptr(),
+                c"MIT OR Apache-2.0".as_ptr(),
+                c"Opens btrfs (subvolumes, zlib / LZO / zstd) and ext2/3/4 file systems on disk images, partitions and disks (read-only).".as_ptr(),
                 c"LINUXFS".as_ptr(),
                 EXTENSIONS.as_ptr(),
                 null(),

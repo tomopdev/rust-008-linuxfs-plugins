@@ -737,6 +737,15 @@ impl BtrfsVolume {
     /// Položky adresáře. Podsvazek v adresáři se hlásí jako adresář, který vede do jiného stromu; speciální soubory
     /// (FIFO, sockety, zařízení) se vynechávají.
     pub fn list_directory(&mut self, dir: NodeId) -> Result<Vec<Node>, VolumeError> {
+        self.list_directory_with_warnings(dir, &mut Vec::new())
+    }
+
+    /// Jako [`BtrfsVolume::list_directory`]; položky, které se nedají přečíst, se přidají do `warnings`.
+    pub fn list_directory_with_warnings(
+        &mut self,
+        dir: NodeId,
+        warnings: &mut Vec<String>,
+    ) -> Result<Vec<Node>, VolumeError> {
         let root = self.tree_root(dir.tree)?;
         let mut entries: Vec<DirItem> = Vec::new();
         self.visit(
@@ -758,8 +767,16 @@ impl BtrfsVolume {
                         ino: e.location.objectid,
                     };
                     // Chybějící nebo nečitelný inode (poškození, osiřelá položka): položka se vynechá, adresář zůstane čitelný.
-                    let Ok(Some(ino)) = self.inode(id.tree, id.ino) else {
-                        continue;
+                    let ino = match self.inode(id.tree, id.ino) {
+                        Ok(Some(i)) => i,
+                        Ok(None) => {
+                            warnings.push(format!("'{name}': directory entry without an inode (inode {})", id.ino));
+                            continue;
+                        }
+                        Err(e) => {
+                            warnings.push(format!("'{name}': inode {} is unreadable: {e}", id.ino));
+                            continue;
+                        }
                     };
                     let kind = match ino.mode & S_IFMT {
                         S_IFDIR => NodeKind::Dir,

@@ -280,3 +280,73 @@ fn progress_callback_can_abort() {
 }
 
 const E_ABORTED_CODE: i32 = E_EABORTED;
+
+#[test]
+fn ext4_lists_and_extracts() {
+    let img = unpack("ext4");
+    let dir = temp_dir();
+    let mut a = Archive::open(&img).unwrap();
+    let mut seen = Vec::new();
+    while let Some(e) = a.next_header().unwrap() {
+        seen.push(e.disp.clone());
+        if e.disp == "hello.txt" || e.disp == "link-rel" {
+            assert_eq!(a.process(PK_EXTRACT, Some(&dir.join(&e.disp))), E_OK);
+        } else {
+            assert_eq!(a.process(PK_SKIP, None), E_OK);
+        }
+    }
+    assert!(seen.iter().any(|n| n == "!EXT4-INFO.txt") && seen.iter().any(|n| n == "names\\日本語.txt"), "{seen:?}");
+    assert_eq!(fs::read(dir.join("hello.txt")).unwrap(), b"Hello, ext!\n");
+    assert_eq!(fs::read(dir.join("link-rel")).unwrap(), b"hello.txt");
+    assert!(a.list_problems.is_empty() && a.extract_problems.is_empty());
+    let mut shown = Vec::new();
+    a.finish(&mut |t| shown.push(t.to_string()));
+    assert!(shown.is_empty());
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Obecný princip: chyba jednoho souboru / části svazku nezastaví zbytek; na konci okno + textový soubor.
+#[test]
+fn damaged_volume_is_listed_and_extracted_to_the_end_with_a_report() {
+    let img = unpack("ext4-damaged");
+    let dir = temp_dir();
+    let _ = win::take_messages();
+
+    // 1) výpis
+    let mut a = Archive::open(&img).unwrap();
+    let names = list(&mut a);
+    assert!(names.len() > 1500, "{}", names.len());
+    assert!(!a.list_problems.is_empty());
+    let mut shown = Vec::new();
+    a.finish(&mut |t| shown.push(t.to_string()));
+    assert_eq!(shown.len(), 1, "{shown:?}");
+    assert!(shown[0].contains("many: ") && shown[0].contains("Full list:"), "{}", shown[0]);
+    let log = std::env::temp_dir().join("linuxfs-errors-list.txt");
+    let text = String::from_utf8_lossy(&fs::read(&log).unwrap()).into_owned();
+    assert!(text.contains("big.bin") && text.contains("Problems:"), "{text}");
+
+    // 2) rozbalení všeho: chybné soubory se vrátí jako chyba, ostatní se rozbalí
+    let mut a = Archive::open(&img).unwrap();
+    a.mode = PK_OM_EXTRACT;
+    let (mut ok, mut bad) = (0, Vec::new());
+    while let Some(e) = a.next_header().unwrap() {
+        let code = a.process(PK_EXTRACT, Some(&dir.join(e.disp.replace('\\', "/"))));
+        if code == E_OK {
+            ok += 1;
+        } else {
+            bad.push((e.disp.clone(), code));
+        }
+    }
+    assert!(ok > 1500, "{ok}");
+    assert_eq!(bad.len(), 2, "{bad:?}");
+    assert!(bad.iter().all(|(n, c)| (n == "big.bin" || n == "names\\Case.txt") && *c == E_BAD_DATA), "{bad:?}");
+    assert!(!dir.join("big.bin").exists(), "no truncated file may remain");
+    assert_eq!(fs::read(dir.join("hello.txt")).unwrap(), b"Hello, ext!\n");
+    let mut shown = Vec::new();
+    a.finish(&mut |t| shown.push(t.to_string()));
+    assert_eq!(shown.len(), 1, "extraction mode reports extraction problems only: {shown:?}");
+    assert!(shown[0].starts_with("2 problems") && shown[0].contains("big.bin"), "{}", shown[0]);
+    let log = std::env::temp_dir().join("linuxfs-errors-unpack.txt");
+    assert!(String::from_utf8_lossy(&fs::read(&log).unwrap()).contains("names\\Case.txt"));
+    fs::remove_dir_all(&dir).unwrap();
+}

@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::detect::{self, LocateError};
 use crate::ffi::{self, ProcessDataProcW};
+use crate::report::ProblemLog;
 use crate::util;
 use crate::volume::{self, LinuxVolume, Node, NodeId, NodeKind, VolumeError};
 
@@ -67,8 +68,14 @@ pub struct Archive {
     listed_any: bool,
     /// Directories already walked (a damaged file system must not send the walk in circles).
     seen: HashSet<(usize, NodeId)>,
-    /// Directories that could not be read (damaged tree) and were skipped.
-    pub skipped_dirs: usize,
+    /// Everything that could not be listed (damaged directories, unreadable entries, partitions that did not open).
+    /// The walk always continues; the list is shown (window + text file) when the archive is closed.
+    pub list_problems: ProblemLog,
+    /// Items that could not be extracted (read or write errors); Total Commander offers skip / abort itself,
+    /// this list only makes sure nothing is lost silently.
+    pub extract_problems: ProblemLog,
+    /// `PK_OM_LIST` or `PK_OM_EXTRACT` from `OpenArchiveW`.
+    pub mode: i32,
     pub progress: Option<ProcessDataProcW>,
 }
 
@@ -82,9 +89,13 @@ impl Archive {
             return Err(OpenError::NoVolume);
         }
         let src = Arc::new(Mutex::new(src));
-        let opened = volume::open_all(&src, &parts, &select).map_err(OpenError::Fs)?;
+        let set = volume::open_all_report(&src, &parts, &select).map_err(OpenError::Fs)?;
+        let mut list_problems = ProblemLog::default();
+        for (place, msg) in &set.failed {
+            list_problems.add(place.clone(), format!("the volume was skipped, it could not be opened: {msg}"));
+        }
         let (labels, vols): (Vec<String>, Vec<LinuxVolume>) =
-            opened.into_iter().map(|o| (o.label, o.vol)).unzip();
+            set.volumes.into_iter().map(|o| (o.label, o.vol)).unzip();
 
         let mut work = Vec::new();
         let mut pending = VecDeque::new();
@@ -118,7 +129,9 @@ impl Archive {
             current: None,
             listed_any: false,
             seen: HashSet::new(),
-            skipped_dirs: 0,
+            list_problems,
+            extract_problems: ProblemLog::default(),
+            mode: ffi::PK_OM_LIST,
             progress: None,
         })
     }
@@ -144,15 +157,23 @@ impl Archive {
             if !self.seen.insert((job.vol, job.id)) {
                 continue;
             }
-            match self.vols[job.vol].list_directory(job.id) {
-                Ok(list) => {
+            match self.vols[job.vol].list_directory_ex(job.id) {
+                Ok(l) => {
                     self.listed_any = true;
-                    self.enqueue(&job, list);
+                    self.list_problems.add_warnings(&job.disp, l.warnings);
+                    self.enqueue(&job, l.nodes);
                 }
                 // Nothing listed yet: the volume is unusable, report it.
-                Err(e) if !self.listed_any => return Err(e),
-                // Damaged subdirectory: skip it, keep the rest of the volume usable.
-                Err(_) => self.skipped_dirs += 1,
+                Err(e) if !self.listed_any => {
+                    self.list_problems
+                        .add(job.disp.clone(), format!("the directory could not be listed: {e}"));
+                    return Err(e);
+                }
+                // Damaged subdirectory: record it, keep the rest of the volume usable.
+                Err(e) => self.list_problems.add(
+                    job.disp.clone(),
+                    format!("the directory could not be listed, its contents are missing: {e}"),
+                ),
             }
         }
     }
@@ -179,33 +200,47 @@ impl Archive {
     }
 
     /// `ProcessFile`: handle the item returned by the last `next_header`.
-    /// Returns a WCX result code (0 = OK).
+    /// Returns a WCX result code (0 = OK). Failures are also recorded in [`Archive::extract_problems`].
     pub fn process(&mut self, op: i32, dest: Option<&Path>) -> i32 {
         let Some(entry) = self.current.clone() else {
             return ffi::E_BAD_DATA;
         };
+        let (code, why) = self.process_entry(&entry, op, dest);
+        if code != ffi::E_OK && code != ffi::E_EABORTED {
+            self.extract_problems.add(entry.disp.clone(), why);
+        }
+        code
+    }
+
+    fn process_entry(&mut self, entry: &Entry, op: i32, dest: Option<&Path>) -> (i32, String) {
         if op == ffi::PK_SKIP {
-            return ffi::E_OK;
+            return (ffi::E_OK, String::new());
         }
         if entry.is_dir {
             if op == ffi::PK_EXTRACT {
-                let Some(d) = dest else { return ffi::E_ECREATE };
-                if fs::create_dir_all(util::long_path(d.to_path_buf())).is_err() {
-                    return ffi::E_ECREATE;
+                let Some(d) = dest else {
+                    return (ffi::E_ECREATE, "no destination path".into());
+                };
+                if let Err(e) = fs::create_dir_all(util::long_path(d.to_path_buf())) {
+                    return (ffi::E_ECREATE, format!("cannot create the folder {}: {e}", d.display()));
                 }
             }
-            return ffi::E_OK;
+            return (ffi::E_OK, String::new());
         }
 
         let extract_to = if op == ffi::PK_EXTRACT {
-            let Some(d) = dest else { return ffi::E_ECREATE };
+            let Some(d) = dest else {
+                return (ffi::E_ECREATE, "no destination path".into());
+            };
             let d = util::long_path(d.to_path_buf());
             if let Some(parent) = d.parent() {
                 let _ = fs::create_dir_all(parent);
             }
             match File::create(&d) {
                 Ok(f) => Some((d, f)),
-                Err(_) => return ffi::E_ECREATE,
+                Err(e) => {
+                    return (ffi::E_ECREATE, format!("cannot create the file {}: {e}", d.display()));
+                }
             }
         } else {
             None
@@ -223,13 +258,13 @@ impl Archive {
         let read = self.vols[entry.vol].read_file_to(entry.id, &mut sink);
         let flushed = sink.flush();
 
-        let code = match read {
-            Ok(_) if flushed.is_err() => ffi::E_EWRITE,
-            Ok(_) => ffi::E_OK,
-            Err(_) if sink.aborted => ffi::E_EABORTED,
-            Err(_) if sink.write_failed => ffi::E_EWRITE,
-            Err(e) if e.is_io() => ffi::E_EREAD,
-            Err(_) => ffi::E_BAD_DATA,
+        let (code, why) = match read {
+            Ok(_) if flushed.is_err() => (ffi::E_EWRITE, format!("write error: {}", flushed.unwrap_err())),
+            Ok(_) => (ffi::E_OK, String::new()),
+            Err(_) if sink.aborted => (ffi::E_EABORTED, String::new()),
+            Err(e) if sink.write_failed => (ffi::E_EWRITE, format!("write error: {e}")),
+            Err(e) if e.is_io() => (ffi::E_EREAD, format!("read error: {e}")),
+            Err(e) => (ffi::E_BAD_DATA, format!("damaged data: {e}")),
         };
         drop(sink);
 
@@ -243,7 +278,33 @@ impl Archive {
                 let _ = fs::remove_file(path); // never leave a truncated file behind
             }
         }
-        code
+        (code, why)
+    }
+
+    /// Called when the archive is closed: saves what went wrong to text files in `%TEMP%` and passes a short summary
+    /// to `show` (a message box). Listing problems are reported when the archive was opened for listing, extraction
+    /// problems when it was opened for extraction (Total Commander lists the archive again for every extraction, so
+    /// the same listing problems are not repeated there).
+    pub fn finish(&self, show: &mut dyn FnMut(&str)) {
+        let listing = self.mode == ffi::PK_OM_LIST;
+        let mut texts = Vec::new();
+        if !self.list_problems.is_empty() {
+            let file = self
+                .list_problems
+                .write_file("list", "problems while listing the archive", &self.arc_name);
+            if listing {
+                texts.push(self.list_problems.window_text("occurred while listing; the rest of the volume is shown", file.as_deref()));
+            }
+        }
+        if !self.extract_problems.is_empty() {
+            let file = self
+                .extract_problems
+                .write_file("unpack", "problems while extracting", &self.arc_name);
+            texts.push(self.extract_problems.window_text("occurred while extracting; the other files were processed", file.as_deref()));
+        }
+        if !texts.is_empty() {
+            show(&texts.join("\n\n-----\n\n"));
+        }
     }
 }
 

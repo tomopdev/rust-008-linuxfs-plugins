@@ -1,6 +1,6 @@
 [package]
 name = "linuxfs-spl"
-description = "linuxfs-plugins: plugin (.spl) pro Open Salamander / Altap Salamander, read-only přístup k souborovým systémům Linuxu (btrfs) v obrazech, oddílech a discích (64 bit)"
+description = "linuxfs-plugins: plugin (.spl) pro Open Salamander / Altap Salamander, read-only přístup k souborovým systémům Linuxu (btrfs, ext2/3/4) v obrazech, oddílech a discích (64 bit)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

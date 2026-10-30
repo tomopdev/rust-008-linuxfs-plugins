@@ -1,12 +1,14 @@
 # Licence použitých knihoven
 
 Seznam je vygenerován z `cargo metadata` (včetně přechodných závislostí, vendorovaného `btrfs-disk` a závislostí jen pro jiné platformy / testy).
-Projekt je šířen pod **GPL-3.0-or-later** (viz `LICENSE`) kvůli kontinuitě s projektem macfs-plugins, ze kterého vychází; **žádná použitá knihovna GPL nevyžaduje** –
-všechny jsou MIT / Apache-2.0 / BSD / Zlib / BSL-1.0 apod., takže lze projekt v případě potřeby přelicencovat.
+Projekt je šířen pod **MIT OR Apache-2.0** (viz `LICENSE-MIT` a `LICENSE-APACHE`; dřív GPL-3.0-or-later kvůli kontinuitě s projektem macfs-plugins). **Žádná použitá knihovna GPL ani jinou copyleftovou licenci nevyžaduje** – všechny jsou MIT / Apache-2.0 / BSD / Zlib / BSL-1.0 apod. (u `r-efi` je LGPL jen jedna z alternativ, používá se MIT / Apache-2.0).
 
 Záměrně nepoužito: **FrankenFS** (a jeho crate) – licence obsahuje dodatek (rider), který zakazuje použití určitým subjektům včetně Anthropic, takže ho
-nelze použít v projektu vytvářeném s Claude. Použitý `btrfs-disk` (MIT OR Apache-2.0, repozitář rustutils/btrfsutils) je vendorován s lokálními
-úpravami popsanými ve `vendor/btrfs-disk/PATCHES.md`.
+nelze použít v projektu vytvářeném s Claude. Použité crates `btrfs-disk` a `ext4-view` (oba MIT OR Apache-2.0) jsou vendorovány s lokálními
+úpravami popsanými ve `vendor/btrfs-disk/PATCHES.md` a `vendor/ext4-view/PATCHES.md`.
+
+Záměrně nepoužito: **ext4-lwext4 / ext4-lwext4-sys** (obalují C knihovnu lwext4, jejíž části jsou GPL-2.0 – s příznaky `gpl-*` by se
+výsledek stal GPL) a crates bez uvedené licence.
 
 | Crate | Verze | Licence | Zdroj |
 |---|---|---|---|
@@ -19,10 +21,13 @@ nelze použít v projektu vytvářeném s Claude. Použitý `btrfs-disk` (MIT OR
 | bytes | 1.12.1 | MIT | https://github.com/tokio-rs/bytes |
 | cfg-if | 1.0.5 | MIT OR Apache-2.0 | https://github.com/rust-lang/cfg-if |
 | cpufeatures | 0.2.17 | MIT OR Apache-2.0 | https://github.com/RustCrypto/utils |
+| crc | 3.4.0 | MIT OR Apache-2.0 | https://github.com/mrhooray/crc-rs.git |
+| crc-catalog | 2.5.0 | MIT OR Apache-2.0 | https://github.com/akhilles/crc-catalog.git |
 | crc32c | 0.6.8 | Apache-2.0/MIT | https://github.com/zowens/crc32c |
 | crc32fast | 1.5.3 | MIT OR Apache-2.0 | https://github.com/srijs/rust-crc32fast |
 | crypto-common | 0.1.7 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
 | digest | 0.10.7 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
+| ext4-view | 1.0.0 | MIT OR Apache-2.0 | https://github.com/nicholasbishop/ext4-view-rs |
 | flate2 | 1.1.10 | MIT OR Apache-2.0 | https://github.com/rust-lang/flate2-rs |
 | futures-core | 0.3.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/futures-rs |
 | futures-task | 0.3.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/futures-rs |

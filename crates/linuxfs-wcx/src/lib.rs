@@ -8,9 +8,10 @@
 
 pub mod archive;
 pub mod ffi;
+pub mod win;
 
 // sdílené moduly z linuxfs-core (zpřístupněné pod krátkými cestami)
-pub use linuxfs_core::{detect, source, util, volume};
+pub use linuxfs_core::{detect, report, source, util, volume};
 
 use std::ffi::{c_char, c_int, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -62,6 +63,7 @@ pub unsafe extern "system" fn OpenArchiveW(data: *mut OpenArchiveDataW) -> Handl
                     a.progress =
                         Some(unsafe { std::mem::transmute::<usize, ProcessDataProcW>(cb) });
                 }
+                a.mode = d.OpenMode;
                 d.OpenResult = E_OK;
                 Box::into_raw(Box::new(a)) as Handle
             }
@@ -146,7 +148,10 @@ pub unsafe extern "system" fn CloseArchive(h: Handle) -> c_int {
     guard(E_ECLOSE, || {
         if !h.is_null() {
             // SAFETY: the handle was created by Box::into_raw in OpenArchiveW and is closed once.
-            drop(unsafe { Box::from_raw(h as *mut Archive) });
+            let a = unsafe { Box::from_raw(h as *mut Archive) };
+            // Nothing that went wrong may be lost silently: summary window + text file (see `Archive::finish`).
+            a.finish(&mut |text| win::warning(text));
+            drop(a);
         }
         E_OK
     })

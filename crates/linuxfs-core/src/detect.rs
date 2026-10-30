@@ -1,7 +1,7 @@
 //! Hledání svazků Linuxu uvnitř zdroje: holý svazek na začátku (obraz oddílu), GPT, MBR (včetně logických oddílů v rozšířeném
 //! oddílu) a textové soubory `.linuxfsdev`, které ukazují na surová zařízení (`\\.\PhysicalDrive2` a podobně).
 //!
-//! Zatím se hledá jen btrfs; další souborové systémy přibudou jako další varianty [`FsKind`].
+//! Hledá se btrfs a ext2/3/4; další souborové systémy přibudou jako další varianty [`FsKind`].
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -13,12 +13,18 @@ use crate::source::DiskSource;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsKind {
     Btrfs,
+    Ext2,
+    Ext3,
+    Ext4,
 }
 
 impl FsKind {
     pub fn name(self) -> &'static str {
         match self {
             FsKind::Btrfs => "btrfs",
+            FsKind::Ext2 => "ext2",
+            FsKind::Ext3 => "ext3",
+            FsKind::Ext4 => "ext4",
         }
     }
 }
@@ -64,7 +70,15 @@ pub fn btrfs_at(src: &mut DiskSource, start: u64, len: u64, label: &str) -> Opti
 
 /// Souborový systém, který začíná na `start`.
 pub fn fs_at(src: &mut DiskSource, start: u64, len: u64, label: &str) -> Option<Part> {
-    btrfs_at(src, start, len, label)
+    if let Some(p) = btrfs_at(src, start, len, label) {
+        return Some(p);
+    }
+    crate::ext::probe(src, start, len).map(|kind| Part {
+        label: label.to_string(),
+        start,
+        len,
+        kind,
+    })
 }
 
 /// Všechny svazky zdroje: holý svazek na začátku, jinak GPT, jinak MBR.
