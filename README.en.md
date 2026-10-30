@@ -2,7 +2,7 @@
 
 *[Česky](README.cs.md)*
 
-**Browse and extract Linux file systems (btrfs, ext2/3/4) in Total Commander and Altap/Open Salamander. Read-only, written in Rust.**
+**Browse and extract Linux file systems (btrfs, ext2/3/4, SquashFS) in Total Commander and Altap/Open Salamander. Read-only, written in Rust.**
 
 ![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)
 ![rust](https://img.shields.io/badge/Rust-edition%202024-orange)
@@ -18,8 +18,8 @@ extract them (F5). Nothing is ever written. The project follows the architecture
 Both plugins share the same core (`linuxfs-core`), so they do the same.
 
 > **Status:** developed and tested on Linux against **images made by real Linux tools** (btrfs: `mkfs.btrfs` + mount, contents compared with what the
-> kernel reports; ext2/3/4: `mke2fs -d` from a source directory, checked with `e2fsck`) and against the plugin ABIs through mock hosts. Manual tests in real
-> Total Commander and Salamander passed for btrfs (several partitions on one disk, a partition with 8 subvolumes). **ext2/3/4** support and the new
+> kernel reports; ext2/3/4: `mke2fs -d` from a source directory, checked with `e2fsck`; SquashFS: `mksquashfs` from a source directory) and against the plugin ABIs through mock hosts. Manual tests in real
+> Total Commander and Salamander passed for btrfs (several partitions on one disk, a partition with 8 subvolumes). **ext2/3/4**, **SquashFS** support and the new
 > **error reporting** are verified by automated tests only; the Windows (MSVC) build has to be done on your side – see [Limitations](#limitations).
 
 ## What is implemented
@@ -28,17 +28,19 @@ Both plugins share the same core (`linuxfs-core`), so they do the same.
 |---|---|---|---|
 | File system | **btrfs** | ✅ read-only | own layer over the vendored `btrfs-disk` 0.13.0 (on-disk structs): B-trees, extents, subvolumes |
 | | **ext2, ext3, ext4** | ✅ read-only | layer over the vendored `ext4-view` 1.0.0 (extents and indirect blocks, HTree, 64bit, `metadata_csum`); the kind is told from feature flags like the kernel does |
+| | **SquashFS** 4.0 | ✅ read-only | crate `rust-fs-squashfs` 0.4.0 (pure Rust, MIT) through an own adapter over `DiskSource`; **gzip, xz, lzo, lz4, zstd** compression (and legacy lzma), fragments, sparse files; items are addressed by inode reference |
 | Compression (btrfs) | zlib, **zstd**, **LZO** | ✅ | zstd via `ruzstd`, zlib via `flate2`, LZO with an own safe decoder |
 | Subvolumes (btrfs) | subvolumes, nested subvolumes, snapshots | ✅ | the top level shows all subvolumes as folders; one can be selected (`subvol=`, `subvolid=`) |
 | Journal (ext3/4) | not cleanly unmounted volume | ✅ in memory only | the journal is **never replayed on disk**, only mapped in memory; you see the state a mount would give after recovery |
 | Files | regular, sparse, prealloc, inline, reflinks, hard links | ✅ | sizes above 4 GiB verified |
 | | symbolic links | ✅ | shown as a small file containing the target |
 | | fifos, sockets, devices | hidden | meaningless on Windows |
-| Partitions | bare volume, **GPT** (512 and 4096 byte sectors), **MBR** (primary and logical) | ✅ | found automatically; several = folders `Partition N - name`; btrfs and ext can sit side by side on one disk |
+| Partitions | bare volume, **GPT** (512 and 4096 byte sectors), **MBR** (primary and logical) | ✅ | found automatically; several = folders `Partition N - name`; btrfs, ext and SquashFS can sit side by side on one disk |
 | Source | image, physical disk / partition | ✅ | disks through a text file `.linuxfsdev` |
 
 Each volume has a virtual description file in its root: `!BTRFS-INFO.txt` (label, UUID, size, subvolume list, default subvolume) or
-`!EXT2-INFO.txt` / `!EXT3-INFO.txt` / `!EXT4-INFO.txt` (label, UUID, sizes, features, state, journal information).
+`!EXT2-INFO.txt` / `!EXT3-INFO.txt` / `!EXT4-INFO.txt` (label, UUID, sizes, features, state, journal information) or
+`!SQUASHFS-INFO.txt` (compression, block size, inode count, creation time, image flags).
 
 Linux file names are arbitrary bytes; the plugins map them to Windows-safe names (illegal characters and reserved names → `_`, invalid UTF-8
 replaced, case-insensitive collisions get ` (2)`); extraction always uses the original entry, not the mapped name.
@@ -62,14 +64,14 @@ shown / extracted, and at the end a summary is shown in a window while the **ful
 
 ## Install
 
-**Total Commander** – open `dist\linuxfs_wcx.zip` (it contains `pluginst.inf`) in TC and confirm. Associate extensions (`btrfs`, `ext4`, `img`, `linuxfsdev`)
+**Total Commander** – open `dist\linuxfs_wcx.zip` (it contains `pluginst.inf`) in TC and confirm. Associate extensions (`btrfs`, `ext4`, `squashfs`, `img`, `linuxfsdev`)
 in *Configuration → Options → Packer*. The plugin detects the format by content, so any file can be opened manually (**Ctrl+PgDn**).
 
-**Salamander** – copy `linuxfs.spl` to `plugins\linuxfs\` and add it in *Plugins → Plugins Manager*. Registered extensions: `btrfs;ext2;ext3;ext4;img;raw;dd;linuxfsdev`.
+**Salamander** – copy `linuxfs.spl` to `plugins\linuxfs\` and add it in *Plugins → Plugins Manager*. Registered extensions: `btrfs;ext2;ext3;ext4;squashfs;sqfs;sfs;img;raw;dd;linuxfsdev`.
 
 ## Usage
 
-* **Image or volume**: double-click / Ctrl+PgDn on `.img`, `.raw`, `.btrfs`, `.ext4`… With several partitions each one gets its own folder.
+* **Image or volume**: double-click / Ctrl+PgDn on `.img`, `.raw`, `.btrfs`, `.ext4`, `.squashfs` / `.sqfs`… With several partitions each one gets its own folder.
 * **Real disk or partition**: a text file `linux.linuxfsdev`
 
   ```ini
@@ -96,12 +98,12 @@ Requirements: Rust ≥ 1.97, `stable-x86_64-pc-windows-msvc`, Visual Studio Buil
 .\build.ps1 -Native          # -C target-cpu=native
 ```
 
-`cargo test --workspace --release` also runs on Linux/macOS. Fixtures can be regenerated with `tools/make-btrfs-fixtures.sh` (Linux, root, btrfs-progs) and
-`tools/make-ext-fixtures.sh` (Linux, **no root needed**, e2fsprogs).
+`cargo test --workspace --release` also runs on Linux/macOS. Fixtures can be regenerated with `tools/make-btrfs-fixtures.sh` (Linux, root, btrfs-progs), `tools/make-ext-fixtures.sh` (Linux, **no root needed**, e2fsprogs) and
+`tools/make-squashfs-fixtures.sh` (Linux, **no root needed**, squashfs-tools).
 
 ## Layout
 
-`crates/linuxfs-core` (source, detect, btrfs, ext, lzo, volume, report), `crates/linuxfs-wcx`, `crates/linuxfs-spl`, `vendor/btrfs-disk` and `vendor/ext4-view`
+`crates/linuxfs-core` (source, detect, btrfs, ext, squashfs, lzo, volume, report), `crates/linuxfs-wcx`, `crates/linuxfs-spl`, `vendor/btrfs-disk` and `vendor/ext4-view`
 (patched upstream crates, see `PATCHES.md`), `tools/`, `build.ps1`.
 
 ## Tests
@@ -109,6 +111,9 @@ Requirements: Rust ≥ 1.97, `stable-x86_64-pc-windows-msvc`, Visual Studio Buil
 The ext images (`ext2`, `ext3`, `ext4`) were made by `mke2fs -d` from a source directory (1 KiB / 4 KiB blocks, journal, extents, `metadata_csum`, 3000 files in a directory, deep trees,
 fast and slow symlinks, invalid UTF-8 in a name, a sparse file with holes in indirect blocks); the manifest comes from the source and `e2fsck -fn` verified the image.
 `ext4-damaged` has a zeroed inode, a zeroed directory and one zeroed block of a large directory, and checks that the rest is read and the errors are reported.
+The SquashFS images (`squashfs-gzip`, `-xz`, `-zstd`, `-lz4`, `-lzo`) were made by `mksquashfs` from one source directory (different compression and block size from 4 KiB to 1 MiB, with and without fragments and export table;
+1500 files in a directory spanning several metadata blocks, 200 small files in fragments, a sparse file, a deep tree, symlinks, invalid UTF-8 in a name); the shared `squashfs.manifest` comes from the source.
+`squashfs-damaged` has a destroyed compressed data block of one file and the first directory metadata block, and checks that the rest is read and the errors are reported.
 The plugin tests run against mock hosts and also check the windows and the text files with errors.
 
 ## Limitations
@@ -121,6 +126,9 @@ The plugin tests run against mock hosts and also check the windows and the text 
 * **ext:** refused features (the volume does not open, with a message): compression, `meta_bg`, MMP, `ea_inode`, `dirdata`, `large_dir`, **`inline_data`**, a separate journal device,
   and ext2 **without `filetype`** (very old volumes). fscrypt-encrypted items are not read. Metadata checksums (`metadata_csum`) are verified, data is not.
   The journal is only mapped in memory (no recovery on disk).
+* **SquashFS:** version 4.0 only (older 1.x–3.x are not recognised); gzip, xz, lzo, lz4, zstd and legacy lzma (best effort only). The image has no data checksums, so damage is noticed only where decompression
+  or a structure check fails; a truncated image does not open (with a message). `rust-fs-squashfs` is a young crate (0.4.0, one author); correctness is verified on `mksquashfs` images only (see Tests).
+  A directory listing is decompressed as a whole, so a directory with a damaged metadata block is not listed at all (it is reported as an unreadable directory).
 * xattrs, ACLs and Linux permissions are not shown; times are mtime converted to UTC. Physical drives and MBR extended partitions were tested on images only.
 * `ext4-view` is an upstream 1.0 crate with local patches; two of them fix real problems (sparse files on ext2/3, listing aborted by a damaged block). They should be reported upstream;
   once merged, `vendor/ext4-view` can be dropped.
@@ -176,4 +184,4 @@ see [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md). FrankenFS was not used b
 
 ## Acknowledgements
 
-The crates `btrfs-disk` (rustutils/btrfsutils), `ext4-view` (Nicholas Bishop, Google), `ruzstd`, `flate2`, the btrfs and ext4 documentation (kernel.org) and the macfs-plugins project the plugin structure comes from.
+The crates `btrfs-disk` (rustutils/btrfsutils), `ext4-view` (Nicholas Bishop, Google), `rust-fs-squashfs` (antimatter-studios), `ruzstd`, `flate2`, the btrfs and ext4 documentation (kernel.org) and the macfs-plugins project the plugin structure comes from.

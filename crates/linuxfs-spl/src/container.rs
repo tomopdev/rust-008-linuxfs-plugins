@@ -39,7 +39,7 @@ impl fmt::Display for OpenError {
                 "cannot open the source: {e} (raw disks need Salamander run as administrator)"
             ),
             OpenError::Config(m) => write!(f, "invalid .linuxfsdev file: {m}"),
-            OpenError::NoVolume => write!(f, "no supported file system (btrfs, ext2/3/4) found"),
+            OpenError::NoVolume => write!(f, "no supported file system (btrfs, ext2/3/4, SquashFS) found"),
             OpenError::Fs(e) => write!(f, "cannot read the file system: {e}"),
         }
     }

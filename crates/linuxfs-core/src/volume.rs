@@ -1,4 +1,4 @@
-//! Jednotný pohled na jeden svazek Linuxu (btrfs, ext2/3/4), aby pluginy nemusely řešit, o který souborový systém jde.
+//! Jednotný pohled na jeden svazek Linuxu (btrfs, ext2/3/4, squashfs), aby pluginy nemusely řešit, o který souborový systém jde.
 //!
 //! Položky se adresují číslem ([`NodeId`]: strom + inode), ne cestou: názvy souborů v Linuxu jsou libovolné bajty
 //! a po převodu do Unicode (a po očistě pro Windows) by se podle nich položka nedala spolehlivě najít.
@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::btrfs::{BtrfsVolume, SubvolSelect};
 use crate::ext::ExtVolume;
+use crate::squashfs::SquashVolume;
 use crate::detect::{FsKind, Part};
 use crate::source::{DiskSource, Slice};
 
@@ -22,6 +23,7 @@ pub fn info_name_for(kind: FsKind) -> &'static str {
         FsKind::Ext2 => "!EXT2-INFO.txt",
         FsKind::Ext3 => "!EXT3-INFO.txt",
         FsKind::Ext4 => "!EXT4-INFO.txt",
+        FsKind::Squashfs => "!SQUASHFS-INFO.txt",
     }
 }
 
@@ -109,6 +111,7 @@ impl From<io::Error> for VolumeError {
 enum Fs {
     Btrfs(Box<BtrfsVolume>),
     Ext(Box<ExtVolume>),
+    Squash(Box<SquashVolume>),
 }
 
 pub struct LinuxVolume {
@@ -132,6 +135,7 @@ impl LinuxVolume {
         match &self.fs {
             Fs::Btrfs(v) => v.root(),
             Fs::Ext(v) => v.root(),
+            Fs::Squash(v) => v.root(),
         }
     }
 
@@ -155,6 +159,7 @@ impl LinuxVolume {
         match &self.fs {
             Fs::Btrfs(v) => v.info_text(),
             Fs::Ext(v) => v.info_text(),
+            Fs::Squash(v) => v.info_text(),
         }
     }
 
@@ -172,6 +177,7 @@ impl LinuxVolume {
                 Listing { nodes, warnings }
             }
             Fs::Ext(v) => v.list_directory(dir)?,
+            Fs::Squash(v) => v.list_directory(dir)?,
         };
         if dir == self.root() {
             l.nodes.push(self.info_node());
@@ -189,6 +195,7 @@ impl LinuxVolume {
         match &mut self.fs {
             Fs::Btrfs(v) => v.read_file_to(id, out),
             Fs::Ext(v) => v.read_file_to(id, out),
+            Fs::Squash(v) => v.read_file_to(id, out),
         }
     }
 }
@@ -212,6 +219,15 @@ pub fn open_part(
             Ok(LinuxVolume {
                 kind: v.kind(),
                 fs: Fs::Ext(Box::new(v)),
+                name,
+            })
+        }
+        FsKind::Squashfs => {
+            let v = SquashVolume::open(src, part.start, part.len)?;
+            let name = v.label().to_string();
+            Ok(LinuxVolume {
+                kind: v.kind(),
+                fs: Fs::Squash(Box::new(v)),
                 name,
             })
         }

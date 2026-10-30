@@ -16,10 +16,10 @@ use crate::spl::*;
 use crate::util;
 use crate::win::{self, Answer, Kind};
 
-pub const PLUGIN_NAME: &str = "LinuxFS (btrfs, ext2/3/4)";
+pub const PLUGIN_NAME: &str = "LinuxFS (btrfs, ext2/3/4, SquashFS)";
 /// Přípony, podle kterých Salamander pozná archivy tohoto pluginu (obsah se neprohledává).
-const EXTENSIONS: &CStr = c"btrfs;ext2;ext3;ext4;img;raw;dd;linuxfsdev";
-const ABOUT_TEXT: &str = "LinuxFS: read-only archiver plugin for Linux file systems: btrfs (subvolumes and snapshots shown as folders of the top-level volume, transparent zlib / LZO / zstd compression) and ext2 / ext3 / ext4, on disk images, partitions and whole GPT / MBR disks.\n\nWritten in Rust on top of the btrfs-disk and ext4-view crates (MIT OR Apache-2.0); LZO and the layer that walks the B-trees are part of the plugin.\n\nThe file '!BTRFS-INFO.txt' ('!EXT4-INFO.txt' ...) in the root of the volume describes the file system. If something cannot be read, the plugin carries on with the rest and shows what failed in a message and in a text file in the temp folder. Symbolic links are shown as small files with the link target; FIFOs, sockets and device nodes are not shown. Data checksums are not verified.\n\nOpens disk images and raw partitions; use a *.linuxfsdev link file for physical disks and to choose a subvolume (see README).";
+const EXTENSIONS: &CStr = c"btrfs;ext2;ext3;ext4;squashfs;sqfs;sfs;img;raw;dd;linuxfsdev";
+const ABOUT_TEXT: &str = "LinuxFS: read-only archiver plugin for Linux file systems: btrfs (subvolumes and snapshots shown as folders of the top-level volume, transparent zlib / LZO / zstd compression), ext2 / ext3 / ext4 and SquashFS (gzip, xz, lzo, lz4, zstd), on disk images, partitions and whole GPT / MBR disks.\n\nWritten in Rust on top of the btrfs-disk, ext4-view and rust-fs-squashfs crates (MIT / Apache-2.0); LZO and the layer that walks the B-trees are part of the plugin.\n\nThe file '!BTRFS-INFO.txt' ('!EXT4-INFO.txt', '!SQUASHFS-INFO.txt' ...) in the root of the volume describes the file system. If something cannot be read, the plugin carries on with the rest and shows what failed in a message and in a text file in the temp folder. Symbolic links are shown as small files with the link target; FIFOs, sockets and device nodes are not shown. Data checksums are not verified.\n\nOpens disk images and raw partitions; use a *.linuxfsdev link file for physical disks and to choose a subvolume (see README).";
 
 /// `CSalamanderGeneralAbstract*` received in `SalamanderPluginEntry`.
 pub static GENERAL: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
@@ -214,7 +214,7 @@ fn open_container(arc: &str, parent: HWND) -> Option<Container> {
         Ok(c) => Some(c),
         Err(e) => {
             let hint = if matches!(e, OpenError::NoVolume) {
-                "\n\nSalamander opens files by extension; the file must contain a btrfs or ext2/3/4 file system (directly, or on a GPT / MBR disk)."
+                "\n\nSalamander opens files by extension; the file must contain a btrfs, ext2/3/4 or SquashFS file system (directly, or on a GPT / MBR disk)."
             } else {
                 ""
             };
@@ -843,11 +843,11 @@ pub unsafe fn plugin_entry(entry: *mut Entry) -> *mut c_void {
             GENERAL.store((vt.GetSalamanderGeneral)(entry), Ordering::Release);
             let ok = (vt.SetBasicPluginData)(
                 entry,
-                c"LinuxFS (btrfs, ext2/3/4)".as_ptr(),
+                c"LinuxFS (btrfs, ext2/3/4, SquashFS)".as_ptr(),
                 FUNCTION_PANELARCHIVERVIEW,
                 c"0.1.0".as_ptr(),
                 c"MIT OR Apache-2.0".as_ptr(),
-                c"Opens btrfs (subvolumes, zlib / LZO / zstd) and ext2/3/4 file systems on disk images, partitions and disks (read-only).".as_ptr(),
+                c"Opens btrfs (subvolumes, zlib / LZO / zstd), ext2/3/4 and SquashFS file systems on disk images, partitions and disks (read-only).".as_ptr(),
                 c"LINUXFS".as_ptr(),
                 EXTENSIONS.as_ptr(),
                 null(),

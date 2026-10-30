@@ -556,7 +556,7 @@ fn sha_of(p: &Path) -> String {
 // tests
 // ---------------------------------------------------------------------------
 
-const EXTENSIONS: &str = "btrfs;ext2;ext3;ext4;img;raw;dd;linuxfsdev";
+const EXTENSIONS: &str = "btrfs;ext2;ext3;ext4;squashfs;sqfs;sfs;img;raw;dd;linuxfsdev";
 
 #[test]
 fn entry_points_and_connect() {
@@ -1001,6 +1001,30 @@ fn ext4_is_listed_and_unpacked() {
     assert_eq!(unpack(&img, &out, "", &items, &mut ops), TRUE);
     assert_eq!(fs::read(out.join("hello.txt")).unwrap(), b"Hello, ext!\n");
     assert_eq!(sha_of(&out.join("big.bin")), manifest_sha("ext4", "big.bin"));
+    assert_eq!(fs::read(out.join("link-rel")).unwrap(), b"hello.txt");
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn squashfs_is_listed_and_unpacked() {
+    let dir = temp_dir();
+    let img = unpack_image(&dir, "squashfs-zstd");
+    let _ = take_messages();
+    let (r, d) = list(&img);
+    assert_eq!(r, TRUE);
+    assert!(take_messages().is_empty(), "an intact volume reports nothing");
+    assert!(d.adds.iter().any(|a| !a.is_dir && a.name == "!SQUASHFS-INFO.txt"));
+    assert!(d.adds.iter().any(|a| a.is_dir && a.name == "deep"));
+    let hello = d.adds.iter().find(|a| a.name == "hello.txt").unwrap();
+    assert_eq!(hello.size, 17);
+
+    let out = dir.join("out");
+    fs::create_dir_all(&out).unwrap();
+    let mut ops = MockOps::new();
+    let items = [("hello.txt", false, 17), ("big.bin", false, 400_000), ("link-rel", false, 9)];
+    assert_eq!(unpack(&img, &out, "", &items, &mut ops), TRUE);
+    assert_eq!(fs::read(out.join("hello.txt")).unwrap(), b"Hello, squashfs!\n");
+    assert_eq!(sha_of(&out.join("big.bin")), manifest_sha("squashfs", "big.bin"));
     assert_eq!(fs::read(out.join("link-rel")).unwrap(), b"hello.txt");
     fs::remove_dir_all(&dir).unwrap();
 }

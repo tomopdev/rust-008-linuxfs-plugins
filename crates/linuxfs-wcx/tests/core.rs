@@ -305,6 +305,30 @@ fn ext4_lists_and_extracts() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
+#[test]
+fn squashfs_lists_and_extracts() {
+    let img = unpack("squashfs-xz");
+    let dir = temp_dir();
+    let mut a = Archive::open(&img).unwrap();
+    let mut seen = Vec::new();
+    while let Some(e) = a.next_header().unwrap() {
+        seen.push(e.disp.clone());
+        if e.disp == "hello.txt" || e.disp == "link-rel" {
+            assert_eq!(a.process(PK_EXTRACT, Some(&dir.join(&e.disp))), E_OK);
+        } else {
+            assert_eq!(a.process(PK_SKIP, None), E_OK);
+        }
+    }
+    assert!(seen.iter().any(|n| n == "!SQUASHFS-INFO.txt") && seen.iter().any(|n| n == "names\\日本語.txt"), "{seen:?}");
+    assert_eq!(fs::read(dir.join("hello.txt")).unwrap(), b"Hello, squashfs!\n");
+    assert_eq!(fs::read(dir.join("link-rel")).unwrap(), b"hello.txt");
+    assert!(a.list_problems.is_empty() && a.extract_problems.is_empty());
+    let mut shown = Vec::new();
+    a.finish(&mut |t| shown.push(t.to_string()));
+    assert!(shown.is_empty());
+    fs::remove_dir_all(&dir).unwrap();
+}
+
 /// Obecný princip: chyba jednoho souboru / části svazku nezastaví zbytek; na konci okno + textový soubor.
 #[test]
 fn damaged_volume_is_listed_and_extracted_to_the_end_with_a_report() {
