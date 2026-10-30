@@ -1,0 +1,6 @@
+[plugininstall]
+description=LinuxFS: btrfs file systems (subvolumes, zlib / LZO / zstd compression) on disk images, partitions and whole GPT / MBR disks (read-only); raw disks via .linuxfsdev
+type=wcx
+file=linuxfs_wcx.wcx
+defaultdir=LinuxFsWcx
+defaultextension=img

@@ -1,0 +1,32 @@
+# linuxfs-plugins – pluginy pro souborové manažery (Total Commander, Altap/Open Salamander) pro souborové systémy Linuxu: btrfs (jen čtení, včetně podsvazků a komprese zlib/LZO/zstd), další přibudou.
+[workspace]
+resolver = "3"
+members = ["crates/linuxfs-core", "crates/linuxfs-wcx", "crates/linuxfs-spl"]
+exclude = ["vendor/btrfs-disk"] # upstream crate s lokálními patchi (viz PATCHES.md v adresáři), není členem workspace
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "GPL-3.0-or-later"
+publish = false
+
+[workspace.dependencies]
+btrfs-disk = { path = "vendor/btrfs-disk", version = "=0.13.0" } # parser on-disk struktur btrfs (MIT OR Apache-2.0), bez bindgenu, viz vendor/btrfs-disk/PATCHES.md
+# dekomprese extentů btrfs: zlib (flate2, čistý Rust), zstd (ruzstd, čistý Rust); LZO je v linuxfs-core/src/lzo.rs
+flate2 = "1"
+ruzstd = "0.9"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_Time",
+] }
+linuxfs-core = { path = "crates/linuxfs-core" }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "unwind" # MUSÍ zůstat "unwind": exportované funkce pluginů používají catch_unwind, aby chyba nikdy nesrazila hostitelskou aplikaci (panic unikající skrz extern "system" by proces ukončil).

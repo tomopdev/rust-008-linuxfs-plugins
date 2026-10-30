@@ -1,0 +1,5 @@
+256	5	@
+257	5	@home
+258	256	@/nested
+259	5	@snapshots/@-snap1
+default=256

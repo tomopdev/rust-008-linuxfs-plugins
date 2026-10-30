@@ -1,0 +1,22 @@
+[package]
+name = "linuxfs-wcx"
+description = "linuxfs-plugins: Total Commander WCX plugin, read-only přístup k souborovým systémům Linuxu (btrfs) v obrazech, oddílech a discích (64 bit)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "linuxfs_wcx"  # cdylib = vlastní DLL pluginu (přejmenuje se na .wcx64), rlib = aby ho mohl linkovat `cargo test`
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+linuxfs-core.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
+[dev-dependencies]
+flate2.workspace = true
+sha2 = "0.10"

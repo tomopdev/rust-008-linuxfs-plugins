@@ -1,0 +1,19 @@
+[package]
+name = "linuxfs-core"
+description = "Společné jádro pluginů linuxfs-plugins: zdroj dat (obraz/disk), hledání svazků (holý svazek, GPT, MBR vč. logických oddílů), btrfs (podsvazky, komprese zlib/LZO/zstd), jména a časy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+btrfs-disk.workspace = true
+flate2.workspace = true
+ruzstd.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
+[dev-dependencies]
+sha2 = "0.10"

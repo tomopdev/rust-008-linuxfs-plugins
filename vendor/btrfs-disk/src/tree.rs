@@ -1,0 +1,1226 @@
+//! # Parsing btrfs B-tree nodes and leaves from raw blocks
+//!
+//! A btrfs filesystem is organized as a collection of B-trees. Each tree is
+//! stored as a hierarchy of blocks (nodesize bytes each, typically 16 KiB).
+//! Internal nodes contain key pointers to child blocks; leaves contain items
+//! with their associated data payloads.
+//!
+//! This module provides typed Rust structs for all tree block components and
+//! enums for key types and well-known object IDs, with safe LE parsing from
+//! raw byte buffers.
+
+use crate::{raw, util::get_uuid};
+use bytes::Buf;
+use std::{fmt, mem};
+use uuid::Uuid;
+
+/// Btrfs item key type, identifying what kind of item a key refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum KeyType {
+    /// Inode metadata (POSIX attributes, timestamps, flags). Key:
+    /// `(ino, INODE_ITEM, 0)`. Exactly one per inode in the FS tree.
+    InodeItem,
+    /// Hard-link reference from an inode to a parent directory. Key:
+    /// `(ino, INODE_REF, parent_dir_ino)`. Multiple refs may be packed
+    /// into one item when the inode has several links in the same parent.
+    InodeRef,
+    /// Extended inode reference (when the `extref` feature is enabled).
+    /// Key: `(ino, INODE_EXTREF, hash(parent_ino, name))`. Stores the
+    /// parent inode number inside the struct rather than in the key offset.
+    InodeExtref,
+    /// Extended attribute stored as a directory-entry-like item. Key:
+    /// `(ino, XATTR_ITEM, crc32c(name))`. Data contains the xattr name
+    /// and value.
+    XattrItem,
+    /// fs-verity descriptor item. Key: `(ino, VERITY_DESC_ITEM, 0)`.
+    /// Stores the fs-verity descriptor for a verity-protected file.
+    VerityDescItem,
+    /// fs-verity Merkle tree block. Key: `(ino, VERITY_MERKLE_ITEM, offset)`.
+    /// Stores a block of the Merkle tree used for fs-verity verification.
+    VerityMerkleItem,
+    /// Orphan inode marker. Key: `(ORPHAN_OBJECTID, ORPHAN_ITEM, ino)`.
+    /// Created when an inode is unlinked while still open; cleaned up on
+    /// mount or by orphan cleanup.
+    OrphanItem,
+    /// Directory log item (tree-log only). Key:
+    /// `(dir_ino, DIR_LOG_ITEM, end_range)`. Used during log replay to
+    /// track which directory entries have been logged.
+    DirLogItem,
+    /// Directory log index (tree-log only). Key:
+    /// `(dir_ino, DIR_LOG_INDEX, end_range)`. Index counterpart of
+    /// `DIR_LOG_ITEM`.
+    DirLogIndex,
+    /// Directory entry keyed by name hash. Key:
+    /// `(dir_ino, DIR_ITEM, crc32c(name))`. Multiple entries may share
+    /// the same item when names hash-collide.
+    DirItem,
+    /// Directory entry keyed by sequential index. Key:
+    /// `(dir_ino, DIR_INDEX, seq)`. Provides ordered directory iteration
+    /// independent of the name hash.
+    DirIndex,
+    /// File extent descriptor. Key: `(ino, EXTENT_DATA, file_offset)`.
+    /// Describes how a range of file bytes maps to on-disk storage (inline,
+    /// regular, or preallocated).
+    ExtentData,
+    /// Data checksum. Key: `(EXTENT_CSUM, EXTENT_CSUM, logical_bytenr)`.
+    /// Stores an array of per-sector CRC32C checksums for a contiguous
+    /// range of data blocks.
+    ExtentCsum,
+    /// Tree root descriptor. Key: `(tree_objectid, ROOT_ITEM, 0)`. Stored
+    /// in the root tree; contains the root block pointer, generation,
+    /// subvolume UUIDs, and timestamps.
+    RootItem,
+    /// Backreference from a child subvolume to its parent. Key:
+    /// `(child_tree_id, ROOT_BACKREF, parent_tree_id)`. Contains the
+    /// directory inode and name where the subvolume is mounted.
+    RootBackref,
+    /// Forward reference from a parent subvolume to a child. Key:
+    /// `(parent_tree_id, ROOT_REF, child_tree_id)`. Same on-disk format
+    /// as `ROOT_BACKREF`.
+    RootRef,
+    /// Non-skinny extent allocation record. Key:
+    /// `(bytenr, EXTENT_ITEM, length)`. Tracks reference counts and
+    /// backreferences for a contiguous range of allocated disk space.
+    ExtentItem,
+    /// Skinny metadata extent record (when `skinny_metadata` feature is
+    /// enabled). Key: `(bytenr, METADATA_ITEM, level)`. Like `EXTENT_ITEM`
+    /// but the tree block info is encoded in the key offset instead of an
+    /// extra header.
+    MetadataItem,
+    /// Simple subvolume ownership reference for an extent. Key:
+    /// `(bytenr, EXTENT_OWNER_REF, root_objectid)`. Used with the
+    /// `simple_quota` feature for fast ownership tracking.
+    ExtentOwnerRef,
+    /// Direct backref from a metadata extent to the owning tree. Key:
+    /// `(bytenr, TREE_BLOCK_REF, root_objectid)`. The key offset
+    /// identifies which tree root owns the block.
+    TreeBlockRef,
+    /// Backref from a data extent to a specific file inode. Key:
+    /// `(bytenr, EXTENT_DATA_REF, hash(root, ino, offset))`. Stores
+    /// the root, inode, file offset, and reference count.
+    ExtentDataRef,
+    /// Shared backref from a metadata extent via a parent block. Key:
+    /// `(bytenr, SHARED_BLOCK_REF, parent_bytenr)`. Used for
+    /// snapshot-shared tree blocks.
+    SharedBlockRef,
+    /// Shared backref from a data extent via a parent tree block. Key:
+    /// `(bytenr, SHARED_DATA_REF, parent_bytenr)`. Used for
+    /// snapshot-shared data extents; stores a reference count.
+    SharedDataRef,
+    /// Block group descriptor tracking space usage for a chunk. Key:
+    /// `(logical_offset, BLOCK_GROUP_ITEM, length)`. Contains bytes used
+    /// and the chunk type/RAID profile flags.
+    BlockGroupItem,
+    /// Free space info for a block group in the free space tree. Key:
+    /// `(block_group_offset, FREE_SPACE_INFO, block_group_length)`.
+    /// Describes whether the block group uses bitmaps or extents.
+    FreeSpaceInfo,
+    /// Free space extent in the free space tree. Key:
+    /// `(start, FREE_SPACE_EXTENT, length)`. Represents a contiguous
+    /// free range; the item has no data payload.
+    FreeSpaceExtent,
+    /// Free space bitmap in the free space tree. Key:
+    /// `(start, FREE_SPACE_BITMAP, length)`. A bitmap covering the
+    /// block group's address range; each bit represents one sector.
+    FreeSpaceBitmap,
+    /// Physical extent mapping on a device. Key:
+    /// `(devid, DEV_EXTENT, physical_offset)`. The inverse of a chunk
+    /// stripe: maps a physical range back to the owning chunk.
+    DeviceExtent,
+    /// Device item describing a single device. Key:
+    /// `(DEV_ITEMS, DEV_ITEM, devid)`. Contains size, usage, and UUIDs.
+    /// Also embedded in the superblock.
+    DeviceItem,
+    /// Chunk item mapping logical to physical addresses. Key:
+    /// `(FIRST_CHUNK_TREE, CHUNK_ITEM, logical_offset)`. Contains the
+    /// chunk length, RAID profile, and per-device stripe locations.
+    ChunkItem,
+    /// RAID stripe extent mapping (for the raid-stripe-tree feature). Key:
+    /// `(logical_offset, RAID_STRIPE, length)`. Contains per-device
+    /// physical offsets for the stripe.
+    RaidStripe,
+    /// Quota group status. Key: `(0, QGROUP_STATUS, 0)`. Tracks the
+    /// overall quota accounting state, rescan progress, and enable
+    /// generation.
+    QgroupStatus,
+    /// Quota group accounting info. Key:
+    /// `(level/subvolid, QGROUP_INFO, 0)`. Tracks referenced and
+    /// exclusive bytes for a qgroup.
+    QgroupInfo,
+    /// Quota group limits. Key: `(level/subvolid, QGROUP_LIMIT, 0)`.
+    /// Caps referenced and/or exclusive space usage for a qgroup.
+    QgroupLimit,
+    /// Quota group relation. Key:
+    /// `(child_qgroupid, QGROUP_RELATION, parent_qgroupid)`. Defines
+    /// the parent-child relationship between qgroups.
+    QgroupRelation,
+    /// Temporary item (value 248). `BTRFS_BALANCE_ITEM_KEY` and
+    /// `BTRFS_TEMPORARY_ITEM_KEY` share this value. Used for balance
+    /// status persistence.
+    TemporaryItem,
+    /// Persistent item (value 249). `BTRFS_DEV_STATS_KEY` and
+    /// `BTRFS_PERSISTENT_ITEM_KEY` share this value. Used for device
+    /// statistics and device replace status.
+    PersistentItem,
+    /// Device replace status. Key: `(DEV_REPLACE, DEV_REPLACE, 0)`.
+    /// Persists the state of an in-progress device replace operation
+    /// across reboots.
+    DeviceReplace,
+    /// UUID tree entry for a subvolume. Key:
+    /// `(upper_uuid_half, UUID_KEY_SUBVOL, lower_uuid_half)`. Maps a
+    /// subvolume UUID to its tree objectid for fast lookup.
+    UuidKeySubvol,
+    /// UUID tree entry for a received subvolume. Key:
+    /// `(upper_uuid_half, UUID_KEY_RECEIVED_SUBVOL, lower_uuid_half)`.
+    /// Maps a received UUID to the subvolume objectid.
+    UuidKeyReceivedSubvol,
+    /// String item (typically the superblock's label). Key:
+    /// `(BTRFS_FREE_SPACE_OBJECTID, STRING_ITEM, 0)`. The data payload
+    /// is a raw byte string.
+    StringItem,
+    /// Unrecognized key type byte value.
+    Unknown(u8),
+}
+
+impl KeyType {
+    /// Convert a raw on-disk key type byte to a `KeyType` variant.
+    #[must_use]
+    pub fn from_raw(value: u8) -> Self {
+        match u32::from(value) {
+            raw::BTRFS_INODE_ITEM_KEY => Self::InodeItem,
+            raw::BTRFS_INODE_REF_KEY => Self::InodeRef,
+            raw::BTRFS_INODE_EXTREF_KEY => Self::InodeExtref,
+            raw::BTRFS_XATTR_ITEM_KEY => Self::XattrItem,
+            raw::BTRFS_VERITY_DESC_ITEM_KEY => Self::VerityDescItem,
+            raw::BTRFS_VERITY_MERKLE_ITEM_KEY => Self::VerityMerkleItem,
+            raw::BTRFS_ORPHAN_ITEM_KEY => Self::OrphanItem,
+            raw::BTRFS_DIR_LOG_ITEM_KEY => Self::DirLogItem,
+            raw::BTRFS_DIR_LOG_INDEX_KEY => Self::DirLogIndex,
+            raw::BTRFS_DIR_ITEM_KEY => Self::DirItem,
+            raw::BTRFS_DIR_INDEX_KEY => Self::DirIndex,
+            raw::BTRFS_EXTENT_DATA_KEY => Self::ExtentData,
+            raw::BTRFS_EXTENT_CSUM_KEY => Self::ExtentCsum,
+            raw::BTRFS_ROOT_ITEM_KEY => Self::RootItem,
+            raw::BTRFS_ROOT_BACKREF_KEY => Self::RootBackref,
+            raw::BTRFS_ROOT_REF_KEY => Self::RootRef,
+            raw::BTRFS_EXTENT_ITEM_KEY => Self::ExtentItem,
+            raw::BTRFS_METADATA_ITEM_KEY => Self::MetadataItem,
+            raw::BTRFS_EXTENT_OWNER_REF_KEY => Self::ExtentOwnerRef,
+            raw::BTRFS_TREE_BLOCK_REF_KEY => Self::TreeBlockRef,
+            raw::BTRFS_EXTENT_DATA_REF_KEY => Self::ExtentDataRef,
+            raw::BTRFS_SHARED_BLOCK_REF_KEY => Self::SharedBlockRef,
+            raw::BTRFS_SHARED_DATA_REF_KEY => Self::SharedDataRef,
+            raw::BTRFS_BLOCK_GROUP_ITEM_KEY => Self::BlockGroupItem,
+            raw::BTRFS_FREE_SPACE_INFO_KEY => Self::FreeSpaceInfo,
+            raw::BTRFS_FREE_SPACE_EXTENT_KEY => Self::FreeSpaceExtent,
+            raw::BTRFS_FREE_SPACE_BITMAP_KEY => Self::FreeSpaceBitmap,
+            raw::BTRFS_DEV_EXTENT_KEY => Self::DeviceExtent,
+            raw::BTRFS_DEV_ITEM_KEY => Self::DeviceItem,
+            raw::BTRFS_CHUNK_ITEM_KEY => Self::ChunkItem,
+            raw::BTRFS_RAID_STRIPE_KEY => Self::RaidStripe,
+            raw::BTRFS_QGROUP_STATUS_KEY => Self::QgroupStatus,
+            raw::BTRFS_QGROUP_INFO_KEY => Self::QgroupInfo,
+            raw::BTRFS_QGROUP_LIMIT_KEY => Self::QgroupLimit,
+            raw::BTRFS_QGROUP_RELATION_KEY => Self::QgroupRelation,
+            // 248 = BTRFS_BALANCE_ITEM_KEY = BTRFS_TEMPORARY_ITEM_KEY
+            raw::BTRFS_TEMPORARY_ITEM_KEY => Self::TemporaryItem,
+            // 249 = BTRFS_DEV_STATS_KEY = BTRFS_PERSISTENT_ITEM_KEY
+            raw::BTRFS_PERSISTENT_ITEM_KEY => Self::PersistentItem,
+            raw::BTRFS_DEV_REPLACE_KEY => Self::DeviceReplace,
+            raw::BTRFS_UUID_KEY_SUBVOL => Self::UuidKeySubvol,
+            raw::BTRFS_UUID_KEY_RECEIVED_SUBVOL => Self::UuidKeyReceivedSubvol,
+            raw::BTRFS_STRING_ITEM_KEY => Self::StringItem,
+            _ => Self::Unknown(value),
+        }
+    }
+
+    /// Return the raw u8 key type value.
+    // All btrfs key type constants are defined to fit in u8 (they're the
+    // on-disk key type field); the u32 bindgen type is wider than necessary.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn to_raw(self) -> u8 {
+        match self {
+            Self::InodeItem => raw::BTRFS_INODE_ITEM_KEY as u8,
+            Self::InodeRef => raw::BTRFS_INODE_REF_KEY as u8,
+            Self::InodeExtref => raw::BTRFS_INODE_EXTREF_KEY as u8,
+            Self::XattrItem => raw::BTRFS_XATTR_ITEM_KEY as u8,
+            Self::VerityDescItem => raw::BTRFS_VERITY_DESC_ITEM_KEY as u8,
+            Self::VerityMerkleItem => raw::BTRFS_VERITY_MERKLE_ITEM_KEY as u8,
+            Self::OrphanItem => raw::BTRFS_ORPHAN_ITEM_KEY as u8,
+            Self::DirLogItem => raw::BTRFS_DIR_LOG_ITEM_KEY as u8,
+            Self::DirLogIndex => raw::BTRFS_DIR_LOG_INDEX_KEY as u8,
+            Self::DirItem => raw::BTRFS_DIR_ITEM_KEY as u8,
+            Self::DirIndex => raw::BTRFS_DIR_INDEX_KEY as u8,
+            Self::ExtentData => raw::BTRFS_EXTENT_DATA_KEY as u8,
+            Self::ExtentCsum => raw::BTRFS_EXTENT_CSUM_KEY as u8,
+            Self::RootItem => raw::BTRFS_ROOT_ITEM_KEY as u8,
+            Self::RootBackref => raw::BTRFS_ROOT_BACKREF_KEY as u8,
+            Self::RootRef => raw::BTRFS_ROOT_REF_KEY as u8,
+            Self::ExtentItem => raw::BTRFS_EXTENT_ITEM_KEY as u8,
+            Self::MetadataItem => raw::BTRFS_METADATA_ITEM_KEY as u8,
+            Self::ExtentOwnerRef => raw::BTRFS_EXTENT_OWNER_REF_KEY as u8,
+            Self::TreeBlockRef => raw::BTRFS_TREE_BLOCK_REF_KEY as u8,
+            Self::ExtentDataRef => raw::BTRFS_EXTENT_DATA_REF_KEY as u8,
+            Self::SharedBlockRef => raw::BTRFS_SHARED_BLOCK_REF_KEY as u8,
+            Self::SharedDataRef => raw::BTRFS_SHARED_DATA_REF_KEY as u8,
+            Self::BlockGroupItem => raw::BTRFS_BLOCK_GROUP_ITEM_KEY as u8,
+            Self::FreeSpaceInfo => raw::BTRFS_FREE_SPACE_INFO_KEY as u8,
+            Self::FreeSpaceExtent => raw::BTRFS_FREE_SPACE_EXTENT_KEY as u8,
+            Self::FreeSpaceBitmap => raw::BTRFS_FREE_SPACE_BITMAP_KEY as u8,
+            Self::DeviceExtent => raw::BTRFS_DEV_EXTENT_KEY as u8,
+            Self::DeviceItem => raw::BTRFS_DEV_ITEM_KEY as u8,
+            Self::ChunkItem => raw::BTRFS_CHUNK_ITEM_KEY as u8,
+            Self::RaidStripe => raw::BTRFS_RAID_STRIPE_KEY as u8,
+            Self::QgroupStatus => raw::BTRFS_QGROUP_STATUS_KEY as u8,
+            Self::QgroupInfo => raw::BTRFS_QGROUP_INFO_KEY as u8,
+            Self::QgroupLimit => raw::BTRFS_QGROUP_LIMIT_KEY as u8,
+            Self::QgroupRelation => raw::BTRFS_QGROUP_RELATION_KEY as u8,
+            Self::TemporaryItem => raw::BTRFS_TEMPORARY_ITEM_KEY as u8,
+            Self::PersistentItem => raw::BTRFS_PERSISTENT_ITEM_KEY as u8,
+            Self::DeviceReplace => raw::BTRFS_DEV_REPLACE_KEY as u8,
+            Self::UuidKeySubvol => raw::BTRFS_UUID_KEY_SUBVOL as u8,
+            Self::UuidKeyReceivedSubvol => raw::BTRFS_UUID_KEY_RECEIVED_SUBVOL as u8,
+            Self::StringItem => raw::BTRFS_STRING_ITEM_KEY as u8,
+            Self::Unknown(v) => v,
+        }
+    }
+}
+
+impl fmt::Display for KeyType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InodeItem => write!(f, "INODE_ITEM"),
+            Self::InodeRef => write!(f, "INODE_REF"),
+            Self::InodeExtref => write!(f, "INODE_EXTREF"),
+            Self::XattrItem => write!(f, "XATTR_ITEM"),
+            Self::VerityDescItem => write!(f, "VERITY_DESC_ITEM"),
+            Self::VerityMerkleItem => write!(f, "VERITY_MERKLE_ITEM"),
+            Self::OrphanItem => write!(f, "ORPHAN_ITEM"),
+            Self::DirLogItem => write!(f, "DIR_LOG_ITEM"),
+            Self::DirLogIndex => write!(f, "DIR_LOG_INDEX"),
+            Self::DirItem => write!(f, "DIR_ITEM"),
+            Self::DirIndex => write!(f, "DIR_INDEX"),
+            Self::ExtentData => write!(f, "EXTENT_DATA"),
+            Self::ExtentCsum => write!(f, "EXTENT_CSUM"),
+            Self::RootItem => write!(f, "ROOT_ITEM"),
+            Self::RootBackref => write!(f, "ROOT_BACKREF"),
+            Self::RootRef => write!(f, "ROOT_REF"),
+            Self::ExtentItem => write!(f, "EXTENT_ITEM"),
+            Self::MetadataItem => write!(f, "METADATA_ITEM"),
+            Self::ExtentOwnerRef => write!(f, "EXTENT_OWNER_REF"),
+            Self::TreeBlockRef => write!(f, "TREE_BLOCK_REF"),
+            Self::ExtentDataRef => write!(f, "EXTENT_DATA_REF"),
+            Self::SharedBlockRef => write!(f, "SHARED_BLOCK_REF"),
+            Self::SharedDataRef => write!(f, "SHARED_DATA_REF"),
+            Self::BlockGroupItem => write!(f, "BLOCK_GROUP_ITEM"),
+            Self::FreeSpaceInfo => write!(f, "FREE_SPACE_INFO"),
+            Self::FreeSpaceExtent => write!(f, "FREE_SPACE_EXTENT"),
+            Self::FreeSpaceBitmap => write!(f, "FREE_SPACE_BITMAP"),
+            Self::DeviceExtent => write!(f, "DEV_EXTENT"),
+            Self::DeviceItem => write!(f, "DEV_ITEM"),
+            Self::ChunkItem => write!(f, "CHUNK_ITEM"),
+            Self::RaidStripe => write!(f, "RAID_STRIPE"),
+            Self::QgroupStatus => write!(f, "QGROUP_STATUS"),
+            Self::QgroupInfo => write!(f, "QGROUP_INFO"),
+            Self::QgroupLimit => write!(f, "QGROUP_LIMIT"),
+            Self::QgroupRelation => write!(f, "QGROUP_RELATION"),
+            Self::TemporaryItem => write!(f, "TEMPORARY_ITEM"),
+            Self::PersistentItem => write!(f, "PERSISTENT_ITEM"),
+            Self::DeviceReplace => write!(f, "DEV_REPLACE"),
+            Self::UuidKeySubvol => write!(f, "UUID_KEY_SUBVOL"),
+            Self::UuidKeyReceivedSubvol => {
+                write!(f, "UUID_KEY_RECEIVED_SUBVOL")
+            }
+            Self::StringItem => write!(f, "STRING_ITEM"),
+            Self::Unknown(v) => write!(f, "UNKNOWN.{v}"),
+        }
+    }
+}
+
+/// Well-known btrfs object IDs used as tree IDs, namespace roots, and
+/// special-purpose objectids in item keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ObjectId {
+    /// The root tree (objectid 1). Contains `ROOT_ITEM` entries pointing
+    /// to the root block of every other tree in the filesystem.
+    RootTree,
+    /// The extent tree (objectid 2). Tracks all allocated extents
+    /// (metadata tree blocks and data extents) with backreferences to
+    /// their owners.
+    ExtentTree,
+    /// The chunk tree (objectid 3). Maps logical address ranges to
+    /// physical device stripes. Bootstrapped from the superblock's
+    /// `sys_chunk_array`.
+    ChunkTree,
+    /// The device tree (objectid 4). Contains per-device extent
+    /// allocation records (`DEV_EXTENT` items).
+    DevTree,
+    /// The default FS tree (objectid 5). Holds the filesystem content
+    /// (inodes, directory entries, file extents) for the top-level
+    /// subvolume. Additional subvolumes/snapshots have objectids >= 256.
+    FsTree,
+    /// The root tree directory (objectid 6). A virtual directory entry
+    /// in the root tree that links to the default subvolume.
+    RootTreeDir,
+    /// The checksum tree (objectid 7). Stores per-block data checksums
+    /// as `EXTENT_CSUM` items.
+    CsumTree,
+    /// The quota tree (objectid 8). Contains qgroup status, info, limit,
+    /// and relation items for space accounting.
+    QuotaTree,
+    /// The UUID tree (objectid 9). Provides fast UUID-to-subvolume
+    /// lookups for send/receive operations.
+    UuidTree,
+    /// The free space tree (objectid 10). Tracks free space per block
+    /// group using extent or bitmap items, replacing the older free
+    /// space cache (v1).
+    FreeSpaceTree,
+    /// The block group tree (objectid 11). Separates block group items
+    /// from the extent tree for faster mount times (requires the
+    /// `block_group_tree` compat-ro feature).
+    BlockGroupTree,
+    /// The RAID stripe tree (objectid 12). Maps logical extents to
+    /// per-device physical stripe offsets for the `raid-stripe-tree`
+    /// feature.
+    RaidStripeTree,
+    /// The remap tree (objectid 13). Reserved for future use by the
+    /// extent-tree-v2 feature.
+    RemapTree,
+    /// Device statistics objectid (0). Used with `PERSISTENT_ITEM_KEY`
+    /// to store per-device I/O error counters.
+    DeviceStats,
+    /// Balance status objectid (-4 as u64). Stored in the root tree
+    /// as a `TEMPORARY_ITEM` to persist in-progress balance state.
+    Balance,
+    /// Orphan objectid (-5 as u64). Used as the objectid for
+    /// `ORPHAN_ITEM` keys that mark inodes pending cleanup.
+    Orphan,
+    /// Tree log objectid (-6 as u64). The tree log records recent
+    /// fsync'd changes for fast replay after a crash.
+    TreeLog,
+    /// Tree log fixup objectid (-7 as u64). Temporary items created
+    /// during log replay to resolve backreferences.
+    TreeLogFixup,
+    /// Tree relocation objectid (-8 as u64). Used during balance to
+    /// hold relocated tree blocks before they are committed to their
+    /// final location.
+    TreeReloc,
+    /// Data relocation tree objectid (-9 as u64). A temporary tree
+    /// used during balance to hold relocated data extents.
+    DataRelocTree,
+    /// Extent checksum objectid (-10 as u64). Used as the objectid in
+    /// `EXTENT_CSUM` keys in the checksum tree.
+    ExtentCsum,
+    /// Free space objectid (-11 as u64). Used in the older free space
+    /// cache (v1) inode items.
+    FreeSpace,
+    /// Free inode objectid (-12 as u64). Used for free inode number
+    /// tracking within FS trees.
+    FreeIno,
+    /// Checksum change objectid (-13 as u64). Used during online
+    /// checksum algorithm conversion.
+    CsumChange,
+    /// Multiple objectids sentinel (-255 as u64). Used internally to
+    /// indicate that an extent is referenced by multiple trees.
+    Multiple,
+    /// First user-accessible objectid (256). Inode numbers in FS trees
+    /// start at this value; the root directory inode is always 256.
+    FirstFree,
+    /// A numeric objectid that doesn't match any well-known value.
+    Id(u64),
+}
+
+impl ObjectId {
+    /// Convert a raw 64-bit objectid to an `ObjectId` variant.
+    // Negative objectid constants (e.g. BTRFS_BALANCE_OBJECTID = -4) are i32
+    // in bindgen output; casting them to u64 intentionally produces the kernel's
+    // two's-complement representation (e.g. 0xFFFFFFFF_FFFFFFFC).
+    #[must_use]
+    #[allow(clippy::cast_sign_loss, clippy::cast_lossless)]
+    pub fn from_raw(value: u64) -> Self {
+        // Positive well-known objectids (bindgen produces u32 for these)
+        match value {
+            v if v == raw::BTRFS_ROOT_TREE_OBJECTID as u64 => Self::RootTree,
+            v if v == raw::BTRFS_EXTENT_TREE_OBJECTID as u64 => Self::ExtentTree,
+            v if v == raw::BTRFS_CHUNK_TREE_OBJECTID as u64 => Self::ChunkTree,
+            v if v == raw::BTRFS_DEV_TREE_OBJECTID as u64 => Self::DevTree,
+            v if v == raw::BTRFS_FS_TREE_OBJECTID as u64 => Self::FsTree,
+            v if v == raw::BTRFS_ROOT_TREE_DIR_OBJECTID as u64 => Self::RootTreeDir,
+            v if v == raw::BTRFS_CSUM_TREE_OBJECTID as u64 => Self::CsumTree,
+            v if v == raw::BTRFS_QUOTA_TREE_OBJECTID as u64 => Self::QuotaTree,
+            v if v == raw::BTRFS_UUID_TREE_OBJECTID as u64 => Self::UuidTree,
+            v if v == raw::BTRFS_FREE_SPACE_TREE_OBJECTID as u64 => Self::FreeSpaceTree,
+            v if v == raw::BTRFS_BLOCK_GROUP_TREE_OBJECTID as u64 => Self::BlockGroupTree,
+            v if v == raw::BTRFS_RAID_STRIPE_TREE_OBJECTID as u64 => Self::RaidStripeTree,
+            v if v == raw::BTRFS_REMAP_TREE_OBJECTID as u64 => Self::RemapTree,
+            // Negative objectids: cast i32 to u64 to get the kernel representation
+            v if v == raw::BTRFS_BALANCE_OBJECTID as u64 => Self::Balance,
+            v if v == raw::BTRFS_ORPHAN_OBJECTID as u64 => Self::Orphan,
+            v if v == raw::BTRFS_TREE_LOG_OBJECTID as u64 => Self::TreeLog,
+            v if v == raw::BTRFS_TREE_LOG_FIXUP_OBJECTID as u64 => Self::TreeLogFixup,
+            v if v == raw::BTRFS_TREE_RELOC_OBJECTID as u64 => Self::TreeReloc,
+            v if v == raw::BTRFS_DATA_RELOC_TREE_OBJECTID as u64 => Self::DataRelocTree,
+            v if v == raw::BTRFS_EXTENT_CSUM_OBJECTID as u64 => Self::ExtentCsum,
+            v if v == raw::BTRFS_FREE_SPACE_OBJECTID as u64 => Self::FreeSpace,
+            v if v == raw::BTRFS_FREE_INO_OBJECTID as u64 => Self::FreeIno,
+            v if v == raw::BTRFS_CSUM_CHANGE_OBJECTID as u64 => Self::CsumChange,
+            v if v == raw::BTRFS_MULTIPLE_OBJECTIDS as u64 => Self::Multiple,
+            _ => Self::Id(value),
+        }
+    }
+
+    /// Return the raw u64 objectid value.
+    #[must_use]
+    #[allow(clippy::cast_sign_loss, clippy::cast_lossless)]
+    pub fn to_raw(self) -> u64 {
+        match self {
+            Self::RootTree => raw::BTRFS_ROOT_TREE_OBJECTID as u64,
+            Self::ExtentTree => raw::BTRFS_EXTENT_TREE_OBJECTID as u64,
+            Self::ChunkTree => raw::BTRFS_CHUNK_TREE_OBJECTID as u64,
+            Self::DevTree => raw::BTRFS_DEV_TREE_OBJECTID as u64,
+            Self::FsTree => raw::BTRFS_FS_TREE_OBJECTID as u64,
+            Self::RootTreeDir => raw::BTRFS_ROOT_TREE_DIR_OBJECTID as u64,
+            Self::CsumTree => raw::BTRFS_CSUM_TREE_OBJECTID as u64,
+            Self::QuotaTree => raw::BTRFS_QUOTA_TREE_OBJECTID as u64,
+            Self::UuidTree => raw::BTRFS_UUID_TREE_OBJECTID as u64,
+            Self::FreeSpaceTree => raw::BTRFS_FREE_SPACE_TREE_OBJECTID as u64,
+            Self::BlockGroupTree => raw::BTRFS_BLOCK_GROUP_TREE_OBJECTID as u64,
+            Self::RaidStripeTree => raw::BTRFS_RAID_STRIPE_TREE_OBJECTID as u64,
+            Self::RemapTree => raw::BTRFS_REMAP_TREE_OBJECTID as u64,
+            Self::DeviceStats => raw::BTRFS_DEV_STATS_OBJECTID as u64,
+            Self::Balance => raw::BTRFS_BALANCE_OBJECTID as u64,
+            Self::Orphan => raw::BTRFS_ORPHAN_OBJECTID as u64,
+            Self::TreeLog => raw::BTRFS_TREE_LOG_OBJECTID as u64,
+            Self::TreeLogFixup => raw::BTRFS_TREE_LOG_FIXUP_OBJECTID as u64,
+            Self::TreeReloc => raw::BTRFS_TREE_RELOC_OBJECTID as u64,
+            Self::DataRelocTree => raw::BTRFS_DATA_RELOC_TREE_OBJECTID as u64,
+            Self::ExtentCsum => raw::BTRFS_EXTENT_CSUM_OBJECTID as u64,
+            Self::FreeSpace => raw::BTRFS_FREE_SPACE_OBJECTID as u64,
+            Self::FreeIno => raw::BTRFS_FREE_INO_OBJECTID as u64,
+            Self::CsumChange => raw::BTRFS_CSUM_CHANGE_OBJECTID as u64,
+            Self::Multiple => raw::BTRFS_MULTIPLE_OBJECTIDS as u64,
+            Self::FirstFree => raw::BTRFS_FIRST_FREE_OBJECTID as u64,
+            Self::Id(v) => v,
+        }
+    }
+
+    /// Display an objectid with context-dependent disambiguation.
+    ///
+    /// Some objectid values have different meanings depending on the key type.
+    /// For example, objectid 1 is `ROOT_TREE` in general but `DEV_ITEMS`
+    /// when used with `DEV_ITEM_KEY`, and `0` is `DEV_STATS` when used
+    /// with `PERSISTENT_ITEM_KEY`.
+    #[must_use]
+    #[allow(clippy::cast_lossless)]
+    pub fn display_with_type(self, key_type: KeyType) -> String {
+        let raw = self.to_raw();
+        // Special disambiguations from the C reference print_objectid()
+        if raw == raw::BTRFS_DEV_ITEMS_OBJECTID as u64 && key_type == KeyType::DeviceItem {
+            return "DEV_ITEMS".to_string();
+        }
+        if raw == raw::BTRFS_DEV_STATS_OBJECTID as u64 && key_type == KeyType::PersistentItem {
+            return "DEV_STATS".to_string();
+        }
+        if raw == raw::BTRFS_FIRST_CHUNK_TREE_OBJECTID as u64 && key_type == KeyType::ChunkItem {
+            return "FIRST_CHUNK_TREE".to_string();
+        }
+        // DEV_EXTENT objectids are device IDs, not tree IDs — print as numbers
+        if key_type == KeyType::DeviceExtent {
+            return raw.to_string();
+        }
+        self.to_string()
+    }
+
+    /// Parse a tree name string (for CLI `-t` flag) into an `ObjectId`.
+    pub fn from_tree_name(name: &str) -> Option<Self> {
+        match name.to_lowercase().as_str() {
+            "root" => Some(Self::RootTree),
+            "extent" => Some(Self::ExtentTree),
+            "chunk" => Some(Self::ChunkTree),
+            "device" | "dev" => Some(Self::DevTree),
+            "fs" => Some(Self::FsTree),
+            "root_tree_dir" => Some(Self::RootTreeDir),
+            "csum" | "checksum" => Some(Self::CsumTree),
+            "quota" => Some(Self::QuotaTree),
+            "uuid" => Some(Self::UuidTree),
+            "free_space" | "free-space" => Some(Self::FreeSpaceTree),
+            "block_group" | "block-group" => Some(Self::BlockGroupTree),
+            "raid_stripe" | "raid-stripe" => Some(Self::RaidStripeTree),
+            "remap" => Some(Self::RemapTree),
+            "tree_log" | "tree-log" => Some(Self::TreeLog),
+            "tree_log_fixup" | "tree-log-fixup" => Some(Self::TreeLogFixup),
+            "tree_reloc" | "tree-reloc" => Some(Self::TreeReloc),
+            "data_reloc" | "data-reloc" => Some(Self::DataRelocTree),
+            _ => name.parse::<u64>().ok().map(Self::from_raw),
+        }
+    }
+}
+
+impl fmt::Display for ObjectId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RootTree => write!(f, "ROOT_TREE"),
+            Self::ExtentTree => write!(f, "EXTENT_TREE"),
+            Self::ChunkTree => write!(f, "CHUNK_TREE"),
+            Self::DevTree => write!(f, "DEV_TREE"),
+            Self::FsTree => write!(f, "FS_TREE"),
+            Self::RootTreeDir => write!(f, "ROOT_TREE_DIR"),
+            Self::CsumTree => write!(f, "CSUM_TREE"),
+            Self::QuotaTree => write!(f, "QUOTA_TREE"),
+            Self::UuidTree => write!(f, "UUID_TREE"),
+            Self::FreeSpaceTree => write!(f, "FREE_SPACE_TREE"),
+            Self::BlockGroupTree => write!(f, "BLOCK_GROUP_TREE"),
+            Self::RaidStripeTree => write!(f, "RAID_STRIPE_TREE"),
+            Self::RemapTree => write!(f, "REMAP_TREE"),
+            Self::DeviceStats => write!(f, "DEV_STATS"),
+            Self::Balance => write!(f, "BALANCE"),
+            Self::Orphan => write!(f, "ORPHAN"),
+            Self::TreeLog => write!(f, "TREE_LOG"),
+            Self::TreeLogFixup => write!(f, "TREE_LOG_FIXUP"),
+            Self::TreeReloc => write!(f, "TREE_RELOC"),
+            Self::DataRelocTree => write!(f, "DATA_RELOC_TREE"),
+            Self::ExtentCsum => write!(f, "EXTENT_CSUM"),
+            Self::FreeSpace => write!(f, "FREE_SPACE"),
+            Self::FreeIno => write!(f, "FREE_INO"),
+            Self::CsumChange => write!(f, "CSUM_CHANGE"),
+            Self::Multiple => write!(f, "MULTIPLE"),
+            Self::FirstFree => write!(f, "256"),
+            Self::Id(v) => write!(f, "{v}"),
+        }
+    }
+}
+
+/// A parsed btrfs disk key (objectid, type, offset).
+///
+/// Every item and key pointer in a B-tree is addressed by this three-part key.
+/// Keys are sorted lexicographically: first by objectid, then type, then offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiskKey {
+    /// Object this key belongs to (e.g. inode number, tree ID, device ID).
+    pub objectid: u64,
+    /// Discriminates what kind of data this key addresses.
+    pub key_type: KeyType,
+    /// Type-specific offset (e.g. byte offset for extents, directory index).
+    pub offset: u64,
+}
+
+impl DiskKey {
+    /// Parse a disk key from `buf` at byte offset `off`.
+    /// The on-disk layout is: objectid (le64), type (u8), offset (le64) = 17 bytes.
+    #[must_use]
+    pub fn parse(buf: &[u8], off: usize) -> Self {
+        let mut buf = &buf[off..];
+        let objectid = buf.get_u64_le();
+        let key_type = KeyType::from_raw(buf.get_u8());
+        let offset = buf.get_u64_le();
+        Self {
+            objectid,
+            key_type,
+            offset,
+        }
+    }
+}
+
+/// Format a key as `(OBJECTID TYPE OFFSET)` matching the C reference output.
+///
+/// Special formatting rules:
+/// - Qgroup keys: objectid and offset are formatted as `LEVEL/SUBVOLID`
+/// - UUID keys: objectid is formatted as `0x<16-char-hex>`
+/// - Offset of `u64::MAX` is formatted as `-1`
+#[must_use]
+pub fn format_key(key: &DiskKey) -> String {
+    let objectid_str = format_key_objectid(key);
+    let type_str = format_key_type(key);
+    let offset_str = format_key_offset(key);
+    format!("({objectid_str} {type_str} {offset_str})")
+}
+
+fn format_key_objectid(key: &DiskKey) -> String {
+    match key.key_type {
+        KeyType::QgroupRelation | KeyType::QgroupInfo | KeyType::QgroupLimit => {
+            let level = key.objectid >> 48;
+            let subvolid = key.objectid & ((1u64 << 48) - 1);
+            format!("{level}/{subvolid}")
+        }
+        KeyType::UuidKeySubvol | KeyType::UuidKeyReceivedSubvol => {
+            format!("0x{:016x}", key.objectid)
+        }
+        _ => {
+            let oid = ObjectId::from_raw(key.objectid);
+            oid.display_with_type(key.key_type)
+        }
+    }
+}
+
+#[allow(clippy::cast_sign_loss)]
+fn format_key_type(key: &DiskKey) -> String {
+    // Special case: type 0 with FREE_SPACE objectid means UNTYPED
+    if key.key_type == KeyType::Unknown(0) && key.objectid == raw::BTRFS_FREE_SPACE_OBJECTID as u64
+    {
+        return "UNTYPED".to_string();
+    }
+    key.key_type.to_string()
+}
+
+fn format_key_offset(key: &DiskKey) -> String {
+    match key.key_type {
+        KeyType::QgroupRelation
+        | KeyType::QgroupStatus
+        | KeyType::QgroupInfo
+        | KeyType::QgroupLimit => {
+            let level = key.offset >> 48;
+            let subvolid = key.offset & ((1u64 << 48) - 1);
+            format!("{level}/{subvolid}")
+        }
+        KeyType::UuidKeySubvol | KeyType::UuidKeyReceivedSubvol => {
+            format!("0x{:016x}", key.offset)
+        }
+        _ => format!("{}", key.offset),
+    }
+}
+
+bitflags::bitflags! {
+    /// Tree block header flags stored in `btrfs_header::flags` (lower 56 bits;
+    /// the upper 8 bits hold the backref revision).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct HeaderFlags: u64 {
+        const WRITTEN = raw::BTRFS_HEADER_FLAG_WRITTEN as u64;
+        const RELOC   = raw::BTRFS_HEADER_FLAG_RELOC as u64;
+        // Preserve unknown bits from the on-disk value.
+        const _ = !0;
+    }
+}
+
+impl fmt::Display for HeaderFlags {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let known = Self::WRITTEN | Self::RELOC;
+        let mut parts = Vec::new();
+        if self.contains(Self::WRITTEN) {
+            parts.push("WRITTEN");
+        }
+        if self.contains(Self::RELOC) {
+            parts.push("RELOC");
+        }
+        if !(*self & !known).is_empty() {
+            parts.push("UNKNOWN");
+        }
+        if parts.is_empty() {
+            write!(f, "0x0")
+        } else {
+            write!(f, "{}", parts.join("|"))
+        }
+    }
+}
+
+/// Parsed header of a btrfs tree block (shared by nodes and leaves).
+///
+/// Every tree block (node or leaf) begins with this 101-byte header. It
+/// identifies the block's position in the tree, its owning tree, and contains
+/// a checksum covering the entire block.
+#[derive(Debug, Clone)]
+pub struct Header {
+    /// Checksum of everything past this field to the end of the tree block.
+    pub csum: [u8; 32],
+    /// Filesystem UUID (must match the superblock's fsid or `metadata_uuid`).
+    pub fsid: Uuid,
+    /// Logical byte offset where this block is stored.
+    pub bytenr: u64,
+    /// Header flags (lower 56 bits) and backref revision (upper 8 bits).
+    pub flags: HeaderFlags,
+    /// UUID of the chunk tree that maps this block's logical address.
+    pub chunk_tree_uuid: Uuid,
+    /// Transaction generation when this block was last written.
+    pub generation: u64,
+    /// Objectid of the tree that owns this block (e.g. 1 = root tree, 5 = FS tree).
+    pub owner: u64,
+    /// Number of items (leaf) or key pointers (node) in this block.
+    pub nritems: u32,
+    /// Tree level: 0 for leaves, >0 for internal nodes.
+    pub level: u8,
+}
+
+/// Size of the on-disk header in bytes.
+const HEADER_SIZE: usize = mem::size_of::<raw::btrfs_header>();
+
+impl Header {
+    /// Parse a tree block header from the start of `buf`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `buf` is smaller than the on-disk header size (101 bytes).
+    #[must_use]
+    pub fn parse(buf: &[u8]) -> Self {
+        assert!(
+            buf.len() >= HEADER_SIZE,
+            "buffer too small for btrfs_header: {} < {HEADER_SIZE}",
+            buf.len()
+        );
+        let mut b = buf;
+        let mut csum = [0u8; 32];
+        csum.copy_from_slice(&b[..32]);
+        b.advance(32);
+        let fsid = get_uuid(&mut b);
+        let bytenr = b.get_u64_le();
+        let flags = HeaderFlags::from_bits_truncate(b.get_u64_le());
+        let chunk_tree_uuid = get_uuid(&mut b);
+        let generation = b.get_u64_le();
+        let owner = b.get_u64_le();
+        let nritems = b.get_u32_le();
+        let level = b.get_u8();
+        Self {
+            csum,
+            fsid,
+            bytenr,
+            flags,
+            chunk_tree_uuid,
+            generation,
+            owner,
+            nritems,
+            level,
+        }
+    }
+
+    /// Return the backref revision from the flags field.
+    #[must_use]
+    pub fn backref_rev(&self) -> u64 {
+        self.flags.bits() >> raw::BTRFS_BACKREF_REV_SHIFT
+    }
+
+    /// Return the block flags with the backref revision bits masked out.
+    #[must_use]
+    pub fn block_flags(&self) -> HeaderFlags {
+        let mask = (u64::from(raw::BTRFS_BACKREF_REV_MAX) - 1) << raw::BTRFS_BACKREF_REV_SHIFT;
+        HeaderFlags::from_bits_truncate(self.flags.bits() & !mask)
+    }
+}
+
+/// A key pointer from an internal tree node, pointing to a child block.
+#[derive(Debug, Clone, Copy)]
+pub struct KeyPtr {
+    /// The lowest key in the child subtree.
+    pub key: DiskKey,
+    /// Logical byte address of the child tree block.
+    pub blockptr: u64,
+    /// Generation of the child block (used for consistency checks).
+    pub generation: u64,
+}
+
+/// Size of a key pointer on disk.
+const KEY_PTR_SIZE: usize = mem::size_of::<raw::btrfs_key_ptr>();
+
+impl KeyPtr {
+    /// Parse a key pointer from `buf` at byte offset `off`.
+    fn parse(buf: &[u8], off: usize) -> Self {
+        let key = DiskKey::parse(buf, off);
+        let mut buf = &buf[off + 17..];
+        Self {
+            key,
+            blockptr: buf.get_u64_le(),
+            generation: buf.get_u64_le(),
+        }
+    }
+}
+
+/// A leaf item descriptor: key + offset/size into the leaf's data area.
+#[derive(Debug, Clone, Copy)]
+pub struct Item {
+    /// The three-part key that identifies this item (objectid, type, offset).
+    pub key: DiskKey,
+    /// Byte offset of this item's data, relative to the end of the item array
+    /// (i.e. relative to `HEADER_SIZE + nritems * ITEM_SIZE`... but actually
+    /// it's an offset from the start of the leaf data area in the C code,
+    /// which starts right after the header). See `Leaf::item_data()`.
+    pub offset: u32,
+    /// Size of this item's data in bytes.
+    pub size: u32,
+}
+
+/// Size of an item descriptor on disk.
+const ITEM_SIZE: usize = mem::size_of::<raw::btrfs_item>();
+
+impl Item {
+    /// Parse an item descriptor from `buf` at byte offset `off`.
+    fn parse(buf: &[u8], off: usize) -> Self {
+        let key = DiskKey::parse(buf, off);
+        let mut buf = &buf[off + 17..];
+        Self {
+            key,
+            offset: buf.get_u32_le(),
+            size: buf.get_u32_le(),
+        }
+    }
+}
+
+/// A parsed btrfs tree block: either an internal node or a leaf.
+///
+/// Nodes (level > 0) contain sorted key pointers to child blocks. Leaves
+/// (level == 0) contain sorted items whose data payloads can be parsed with
+/// [`crate::items::parse_item_payload`].
+pub enum TreeBlock {
+    /// Internal node (level > 0): contains key pointers to child blocks.
+    Node {
+        /// The tree block header.
+        header: Header,
+        /// Sorted key pointers to child blocks.
+        ptrs: Vec<KeyPtr>,
+    },
+    /// Leaf node (level == 0): contains items with data payloads.
+    Leaf {
+        /// The tree block header.
+        header: Header,
+        /// Sorted item descriptors (key + offset/size into the data area).
+        items: Vec<Item>,
+        /// The full block data, so item formatters can extract payloads.
+        data: Vec<u8>,
+    },
+}
+
+impl TreeBlock {
+    /// Parse a tree block from a nodesize-length buffer.
+    #[must_use]
+    pub fn parse(buf: &[u8]) -> Self {
+        let header = Header::parse(buf);
+        let nritems = header.nritems as usize;
+
+        if header.level > 0 {
+            let mut ptrs = Vec::with_capacity(nritems);
+            for i in 0..nritems {
+                let off = HEADER_SIZE + i * KEY_PTR_SIZE;
+                ptrs.push(KeyPtr::parse(buf, off));
+            }
+            Self::Node { header, ptrs }
+        } else {
+            let mut items = Vec::with_capacity(nritems);
+            for i in 0..nritems {
+                let off = HEADER_SIZE + i * ITEM_SIZE;
+                items.push(Item::parse(buf, off));
+            }
+            Self::Leaf {
+                header,
+                items,
+                data: buf.to_vec(),
+            }
+        }
+    }
+
+    /// Return a reference to the header.
+    #[must_use]
+    pub fn header(&self) -> &Header {
+        match self {
+            Self::Node { header, .. } | Self::Leaf { header, .. } => header,
+        }
+    }
+
+    /// For a leaf block, get the data slice for item at `index`.
+    ///
+    /// The item's `offset` field is relative to the start of the data area,
+    /// which begins right after the header. So the absolute offset in the
+    /// block buffer is `HEADER_SIZE + item.offset`.
+    #[must_use]
+    pub fn item_data(&self, index: usize) -> Option<&[u8]> {
+        match self {
+            Self::Leaf { items, data, .. } => {
+                let item = items.get(index)?;
+                let start = HEADER_SIZE + item.offset as usize;
+                let end = start + item.size as usize;
+                if end <= data.len() {
+                    Some(&data[start..end])
+                } else {
+                    None
+                }
+            }
+            Self::Node { .. } => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Helper to build a minimal LE buffer for a disk key
+    fn make_disk_key(objectid: u64, key_type: u8, offset: u64) -> [u8; 17] {
+        let mut buf = [0u8; 17];
+        buf[0..8].copy_from_slice(&objectid.to_le_bytes());
+        buf[8] = key_type;
+        buf[9..17].copy_from_slice(&offset.to_le_bytes());
+        buf
+    }
+
+    // Helper to build a minimal tree block header
+    fn make_header(bytenr: u64, generation: u64, owner: u64, nritems: u32, level: u8) -> Vec<u8> {
+        let mut buf = vec![0u8; HEADER_SIZE];
+        // csum: leave as zeros
+        // fsid: leave as zeros
+        buf[48..56].copy_from_slice(&bytenr.to_le_bytes());
+        // flags: WRITTEN
+        buf[56..64].copy_from_slice(&(raw::BTRFS_HEADER_FLAG_WRITTEN as u64).to_le_bytes());
+        // chunk_tree_uuid: leave as zeros
+        buf[80..88].copy_from_slice(&generation.to_le_bytes());
+        buf[88..96].copy_from_slice(&owner.to_le_bytes());
+        buf[96..100].copy_from_slice(&nritems.to_le_bytes());
+        buf[100] = level;
+        buf
+    }
+
+    #[test]
+    fn key_type_round_trip() {
+        for raw_val in 0..=255u8 {
+            let kt = KeyType::from_raw(raw_val);
+            assert_eq!(kt.to_raw(), raw_val);
+        }
+    }
+
+    #[test]
+    fn key_type_display() {
+        assert_eq!(KeyType::InodeItem.to_string(), "INODE_ITEM");
+        assert_eq!(KeyType::ChunkItem.to_string(), "CHUNK_ITEM");
+        assert_eq!(KeyType::Unknown(99).to_string(), "UNKNOWN.99");
+    }
+
+    #[test]
+    fn objectid_round_trip() {
+        let cases: &[u64] = &[
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            256,
+            1000,
+            // Negative objectids cast to u64
+            raw::BTRFS_BALANCE_OBJECTID as u64,
+            raw::BTRFS_ORPHAN_OBJECTID as u64,
+            raw::BTRFS_TREE_LOG_OBJECTID as u64,
+            raw::BTRFS_DATA_RELOC_TREE_OBJECTID as u64,
+        ];
+        for &v in cases {
+            let oid = ObjectId::from_raw(v);
+            assert_eq!(oid.to_raw(), v, "round-trip failed for {v}");
+        }
+    }
+
+    #[test]
+    fn objectid_display() {
+        assert_eq!(ObjectId::RootTree.to_string(), "ROOT_TREE");
+        assert_eq!(ObjectId::FsTree.to_string(), "FS_TREE");
+        assert_eq!(ObjectId::Id(256).to_string(), "256");
+        assert_eq!(ObjectId::Id(u64::MAX).to_string(), "18446744073709551615");
+    }
+
+    #[test]
+    fn objectid_display_with_type() {
+        // objectid 1 is normally ROOT_TREE but DEV_ITEMS with DeviceItem key
+        let oid = ObjectId::from_raw(1);
+        assert_eq!(oid.display_with_type(KeyType::RootItem), "ROOT_TREE");
+        assert_eq!(oid.display_with_type(KeyType::DeviceItem), "DEV_ITEMS");
+    }
+
+    #[test]
+    fn objectid_from_tree_name() {
+        assert_eq!(ObjectId::from_tree_name("root"), Some(ObjectId::RootTree));
+        assert_eq!(ObjectId::from_tree_name("CHUNK"), Some(ObjectId::ChunkTree));
+        assert_eq!(
+            ObjectId::from_tree_name("free-space"),
+            Some(ObjectId::FreeSpaceTree)
+        );
+        assert_eq!(ObjectId::from_tree_name("5"), Some(ObjectId::FsTree));
+        assert_eq!(ObjectId::from_tree_name("256"), Some(ObjectId::Id(256)));
+        assert_eq!(ObjectId::from_tree_name("nosuch"), None);
+    }
+
+    #[test]
+    fn parse_disk_key() {
+        let buf = make_disk_key(42, raw::BTRFS_INODE_ITEM_KEY as u8, 100);
+        let key = DiskKey::parse(&buf, 0);
+        assert_eq!(key.objectid, 42);
+        assert_eq!(key.key_type, KeyType::InodeItem);
+        assert_eq!(key.offset, 100);
+    }
+
+    #[test]
+    fn parse_header() {
+        let buf = make_header(65536, 7, 5, 10, 0);
+        let hdr = Header::parse(&buf);
+        assert_eq!(hdr.bytenr, 65536);
+        assert_eq!(hdr.generation, 7);
+        assert_eq!(hdr.owner, 5);
+        assert_eq!(hdr.nritems, 10);
+        assert_eq!(hdr.level, 0);
+        assert_eq!(
+            hdr.block_flags(),
+            HeaderFlags::from_bits_truncate(raw::BTRFS_HEADER_FLAG_WRITTEN as u64)
+        );
+    }
+
+    #[test]
+    fn header_flags_display_written() {
+        let flags = HeaderFlags::from_bits_truncate(raw::BTRFS_HEADER_FLAG_WRITTEN as u64);
+        assert_eq!(flags.to_string(), "WRITTEN");
+    }
+
+    #[test]
+    fn header_flags_display_multiple() {
+        let flags = HeaderFlags::from_bits_truncate(
+            raw::BTRFS_HEADER_FLAG_WRITTEN as u64 | raw::BTRFS_HEADER_FLAG_RELOC as u64,
+        );
+        assert_eq!(flags.to_string(), "WRITTEN|RELOC");
+    }
+
+    #[test]
+    fn parse_leaf_block() {
+        let nodesize = 4096usize;
+        let nritems = 2u32;
+        let mut buf = vec![0u8; nodesize];
+
+        // Write header (level 0 = leaf)
+        let hdr = make_header(65536, 7, 5, nritems, 0);
+        buf[..HEADER_SIZE].copy_from_slice(&hdr);
+
+        // Write two item descriptors
+        // Item 0: key=(256, INODE_ITEM, 0), offset=3800, size=160
+        let key0 = make_disk_key(256, raw::BTRFS_INODE_ITEM_KEY as u8, 0);
+        let item0_off = HEADER_SIZE;
+        buf[item0_off..item0_off + 17].copy_from_slice(&key0);
+        buf[item0_off + 17..item0_off + 21].copy_from_slice(&3800u32.to_le_bytes());
+        buf[item0_off + 21..item0_off + 25].copy_from_slice(&160u32.to_le_bytes());
+
+        // Item 1: key=(256, DIR_ITEM, 100), offset=3700, size=50
+        let key1 = make_disk_key(256, raw::BTRFS_DIR_ITEM_KEY as u8, 100);
+        let item1_off = HEADER_SIZE + ITEM_SIZE;
+        buf[item1_off..item1_off + 17].copy_from_slice(&key1);
+        buf[item1_off + 17..item1_off + 21].copy_from_slice(&3700u32.to_le_bytes());
+        buf[item1_off + 21..item1_off + 25].copy_from_slice(&50u32.to_le_bytes());
+
+        // Write some recognizable data at the item data offsets
+        // Item 0 data at HEADER_SIZE + 3800
+        let data0_start = HEADER_SIZE + 3800;
+        buf[data0_start] = 0xAA;
+        // Item 1 data at HEADER_SIZE + 3700
+        let data1_start = HEADER_SIZE + 3700;
+        buf[data1_start] = 0xBB;
+
+        let block = TreeBlock::parse(&buf);
+
+        match &block {
+            TreeBlock::Leaf { header, items, .. } => {
+                assert_eq!(header.level, 0);
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0].key.key_type, KeyType::InodeItem);
+                assert_eq!(items[1].key.key_type, KeyType::DirItem);
+            }
+            TreeBlock::Node { .. } => panic!("expected leaf"),
+        }
+
+        let data0 = block.item_data(0).unwrap();
+        assert_eq!(data0[0], 0xAA);
+        assert_eq!(data0.len(), 160);
+
+        let data1 = block.item_data(1).unwrap();
+        assert_eq!(data1[0], 0xBB);
+        assert_eq!(data1.len(), 50);
+    }
+
+    #[test]
+    fn parse_node_block() {
+        let nodesize = 4096usize;
+        let nritems = 3u32;
+        let mut buf = vec![0u8; nodesize];
+
+        // Write header (level 1 = node)
+        let hdr = make_header(131072, 10, 2, nritems, 1);
+        buf[..HEADER_SIZE].copy_from_slice(&hdr);
+
+        // Write three key pointers
+        for i in 0..3u64 {
+            let off = HEADER_SIZE + i as usize * KEY_PTR_SIZE;
+            let key = make_disk_key(i + 1, raw::BTRFS_ROOT_ITEM_KEY as u8, 0);
+            buf[off..off + 17].copy_from_slice(&key);
+            let blockptr = (i + 1) * 65536;
+            buf[off + 17..off + 25].copy_from_slice(&blockptr.to_le_bytes());
+            let generation = 10 - i;
+            buf[off + 25..off + 33].copy_from_slice(&generation.to_le_bytes());
+        }
+
+        let block = TreeBlock::parse(&buf);
+
+        match &block {
+            TreeBlock::Node { header, ptrs } => {
+                assert_eq!(header.level, 1);
+                assert_eq!(header.bytenr, 131072);
+                assert_eq!(ptrs.len(), 3);
+                assert_eq!(ptrs[0].blockptr, 65536);
+                assert_eq!(ptrs[1].blockptr, 131072);
+                assert_eq!(ptrs[2].blockptr, 196608);
+                assert_eq!(ptrs[0].generation, 10);
+                assert_eq!(ptrs[2].generation, 8);
+            }
+            TreeBlock::Leaf { .. } => panic!("expected node"),
+        }
+
+        // item_data should return None for nodes
+        assert!(block.item_data(0).is_none());
+    }
+
+    #[test]
+    fn format_key_basic() {
+        let key = DiskKey {
+            objectid: 256,
+            key_type: KeyType::InodeItem,
+            offset: 0,
+        };
+        assert_eq!(format_key(&key), "(256 INODE_ITEM 0)");
+    }
+
+    #[test]
+    fn format_key_well_known_objectid() {
+        let key = DiskKey {
+            objectid: raw::BTRFS_FS_TREE_OBJECTID as u64,
+            key_type: KeyType::RootItem,
+            offset: u64::MAX,
+        };
+        assert_eq!(format_key(&key), "(FS_TREE ROOT_ITEM 18446744073709551615)");
+    }
+
+    #[test]
+    fn format_key_qgroup() {
+        let key = DiskKey {
+            objectid: 0, // level=0, subvolid=0
+            key_type: KeyType::QgroupInfo,
+            offset: (0u64 << 48) | 256, // level=0, subvolid=256
+        };
+        assert_eq!(format_key(&key), "(0/0 QGROUP_INFO 0/256)");
+    }
+
+    #[test]
+    fn format_key_uuid() {
+        let key = DiskKey {
+            objectid: 0xdeadbeef12345678,
+            key_type: KeyType::UuidKeySubvol,
+            offset: 0xabcdef0123456789,
+        };
+        assert_eq!(
+            format_key(&key),
+            "(0xdeadbeef12345678 UUID_KEY_SUBVOL 0xabcdef0123456789)"
+        );
+    }
+
+    #[test]
+    fn format_key_dev_items() {
+        let key = DiskKey {
+            objectid: 1,
+            key_type: KeyType::DeviceItem,
+            offset: 1,
+        };
+        assert_eq!(format_key(&key), "(DEV_ITEMS DEV_ITEM 1)");
+    }
+}

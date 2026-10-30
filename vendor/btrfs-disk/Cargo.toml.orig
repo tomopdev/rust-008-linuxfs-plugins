@@ -1,0 +1,24 @@
+[package]
+name = "btrfs-disk"
+version.workspace = true
+edition.workspace = true
+license = "MIT OR Apache-2.0"
+repository.workspace = true
+homepage.workspace = true
+description = "Platform-independent parsing and writing of btrfs on-disk structures"
+readme = "README.md"
+categories = ["filesystem", "parser-implementations"]
+keywords = ["btrfs", "filesystem", "parser", "userspace"]
+rust-version = "1.85.1"
+
+[dependencies]
+bitflags = { workspace = true }
+blake2 = { workspace = true }
+bytes = { workspace = true }
+crc32c = { workspace = true }
+sha2 = { workspace = true }
+uuid = { workspace = true }
+xxhash-rust = { workspace = true }
+
+[build-dependencies]
+bindgen = { workspace = true }
