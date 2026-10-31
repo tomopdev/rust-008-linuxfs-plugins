@@ -445,6 +445,40 @@ fn unpack_image(dir: &Path, name: &str) -> PathBuf {
     out
 }
 
+/// Rozbalí obraz XFS jako ŘÍDKÝ soubor (nulové megabajty se přeskočí): mkfs.xfs nevyrobí obraz pod 300 MB, ale jsou v něm skoro samé nuly.
+fn unpack_image_sparse(dir: &Path, name: &str) -> PathBuf {
+    let out = dir.join(format!("{name}.img"));
+    let mut gz = flate2::read::GzDecoder::new(
+        File::open(fixture_dir().join(format!("{name}.img.gz"))).unwrap(),
+    );
+    let mut f = File::create(&out).unwrap();
+    let mut buf = vec![0u8; 1 << 20];
+    let mut pos = 0u64;
+    loop {
+        let mut n = 0;
+        while n < buf.len() {
+            let r = gz.read(&mut buf[n..]).unwrap();
+            if r == 0 {
+                break;
+            }
+            n += r;
+        }
+        if n == 0 {
+            break;
+        }
+        if buf[..n].iter().any(|&b| b != 0) {
+            f.seek(SeekFrom::Start(pos)).unwrap();
+            f.write_all(&buf[..n]).unwrap();
+        }
+        pos += n as u64;
+        if n < buf.len() {
+            break;
+        }
+    }
+    f.set_len(pos).unwrap();
+    out
+}
+
 /// Disk s GPT (sektor 512) a jedním oddílem na každý obraz, oddíly po 1 MiB mezerami.
 fn gpt_disk(path: &Path, image: &Path, labels: &[&str]) {
     let sector = 512u64;
@@ -556,7 +590,7 @@ fn sha_of(p: &Path) -> String {
 // tests
 // ---------------------------------------------------------------------------
 
-const EXTENSIONS: &str = "btrfs;ext2;ext3;ext4;squashfs;sqfs;sfs;img;raw;dd;linuxfsdev";
+const EXTENSIONS: &str = "btrfs;ext2;ext3;ext4;squashfs;sqfs;sfs;xfs;img;raw;dd;linuxfsdev";
 
 #[test]
 fn entry_points_and_connect() {
@@ -1025,6 +1059,30 @@ fn squashfs_is_listed_and_unpacked() {
     assert_eq!(unpack(&img, &out, "", &items, &mut ops), TRUE);
     assert_eq!(fs::read(out.join("hello.txt")).unwrap(), b"Hello, squashfs!\n");
     assert_eq!(sha_of(&out.join("big.bin")), manifest_sha("squashfs", "big.bin"));
+    assert_eq!(fs::read(out.join("link-rel")).unwrap(), b"hello.txt");
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn xfs_is_listed_and_unpacked() {
+    let dir = temp_dir();
+    let img = unpack_image_sparse(&dir, "xfs-v5");
+    let _ = take_messages();
+    let (r, d) = list(&img);
+    assert_eq!(r, TRUE);
+    assert!(take_messages().is_empty(), "an intact volume reports nothing");
+    assert!(d.adds.iter().any(|a| !a.is_dir && a.name == "!XFS-INFO.txt"));
+    assert!(d.adds.iter().any(|a| a.is_dir && a.name == "deep"));
+    let hello = d.adds.iter().find(|a| a.name == "hello.txt").unwrap();
+    assert_eq!(hello.size, 12);
+
+    let out = dir.join("out");
+    fs::create_dir_all(&out).unwrap();
+    let mut ops = MockOps::new();
+    let items = [("hello.txt", false, 12), ("big.bin", false, 1_500_000), ("link-rel", false, 9)];
+    assert_eq!(unpack(&img, &out, "", &items, &mut ops), TRUE);
+    assert_eq!(fs::read(out.join("hello.txt")).unwrap(), b"Hello, xfs!\n");
+    assert_eq!(sha_of(&out.join("big.bin")), manifest_sha("xfs-v5", "big.bin"));
     assert_eq!(fs::read(out.join("link-rel")).unwrap(), b"hello.txt");
     fs::remove_dir_all(&dir).unwrap();
 }

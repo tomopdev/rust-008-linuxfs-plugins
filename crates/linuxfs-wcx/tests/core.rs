@@ -45,6 +45,49 @@ fn unpack(name: &str) -> PathBuf {
     out
 }
 
+/// Obraz XFS (přes 300 MB, skoro samé nuly) se rozbalí jako řídký soubor: nulové megabajty se přeskočí.
+fn unpack_xfs(name: &str) -> PathBuf {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let out = std::env::temp_dir().join(format!("linuxfs-wcx-img-{}-{name}.img", std::process::id()));
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if !out.exists() {
+        let gz = File::open(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../linuxfs-core/tests/fixtures")
+                .join(format!("{name}.img.gz")),
+        )
+        .unwrap();
+        let mut dec = flate2::read::GzDecoder::new(gz);
+        let mut f = File::create(&out).unwrap();
+        let mut buf = vec![0u8; 1 << 20];
+        let mut pos = 0u64;
+        loop {
+            let mut n = 0;
+            while n < buf.len() {
+                let r = dec.read(&mut buf[n..]).unwrap();
+                if r == 0 {
+                    break;
+                }
+                n += r;
+            }
+            if n == 0 {
+                break;
+            }
+            if buf[..n].iter().any(|&b| b != 0) {
+                f.seek(SeekFrom::Start(pos)).unwrap();
+                f.write_all(&buf[..n]).unwrap();
+            }
+            pos += n as u64;
+            if n < buf.len() {
+                break;
+            }
+        }
+        f.set_len(pos).unwrap();
+    }
+    out
+}
+
 fn list(a: &mut Archive) -> Vec<(String, bool, u64)> {
     let mut v = Vec::new();
     while let Some(e) = a.next_header().unwrap() {
@@ -297,6 +340,30 @@ fn ext4_lists_and_extracts() {
     }
     assert!(seen.iter().any(|n| n == "!EXT4-INFO.txt") && seen.iter().any(|n| n == "names\\日本語.txt"), "{seen:?}");
     assert_eq!(fs::read(dir.join("hello.txt")).unwrap(), b"Hello, ext!\n");
+    assert_eq!(fs::read(dir.join("link-rel")).unwrap(), b"hello.txt");
+    assert!(a.list_problems.is_empty() && a.extract_problems.is_empty());
+    let mut shown = Vec::new();
+    a.finish(&mut |t| shown.push(t.to_string()));
+    assert!(shown.is_empty());
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn xfs_lists_and_extracts() {
+    let img = unpack_xfs("xfs-v5");
+    let dir = temp_dir();
+    let mut a = Archive::open(&img).unwrap();
+    let mut seen = Vec::new();
+    while let Some(e) = a.next_header().unwrap() {
+        seen.push(e.disp.clone());
+        if e.disp == "hello.txt" || e.disp == "link-rel" {
+            assert_eq!(a.process(PK_EXTRACT, Some(&dir.join(&e.disp))), E_OK);
+        } else {
+            assert_eq!(a.process(PK_SKIP, None), E_OK);
+        }
+    }
+    assert!(seen.iter().any(|n| n == "!XFS-INFO.txt") && seen.iter().any(|n| n == "names\\日本語.txt"), "{seen:?}");
+    assert_eq!(fs::read(dir.join("hello.txt")).unwrap(), b"Hello, xfs!\n");
     assert_eq!(fs::read(dir.join("link-rel")).unwrap(), b"hello.txt");
     assert!(a.list_problems.is_empty() && a.extract_problems.is_empty());
     let mut shown = Vec::new();

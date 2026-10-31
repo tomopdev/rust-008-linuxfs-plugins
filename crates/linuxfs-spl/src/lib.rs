@@ -1,7 +1,7 @@
 #![allow(clippy::missing_safety_doc)] // exports follow the SDK ABI; contracts are in the SDK headers
 
 //! Open Salamander 5.0 / Altap Salamander 4.0 plugin (`.spl`) for read-only access
-//! to Linux file systems (btrfs: subvolumes, zlib / LZO / zstd compression; ext2/3/4; SquashFS) on disk images, partitions and disks,
+//! to Linux file systems (btrfs: subvolumes, zlib / LZO / zstd compression; ext2/3/4; SquashFS; XFS) on disk images, partitions and disks,
 //! implemented in Rust against the C++ plugin SDK ABI.
 //!
 //! The SDK interfaces are abstract C++ classes; `spl.rs` reproduces their vtable

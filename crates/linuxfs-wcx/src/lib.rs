@@ -1,4 +1,4 @@
-//! Total Commander WCX (packer) plugin for Linux file systems: btrfs (subvolumes, zlib / LZO / zstd compression), ext2/3/4 and SquashFS on disk
+//! Total Commander WCX (packer) plugin for Linux file systems: btrfs (subvolumes, zlib / LZO / zstd compression), ext2/3/4, SquashFS and XFS on disk
 //! images, raw partitions and whole disks (GPT / MBR). Everything is read-only.
 //!
 //! Built as a 64-bit DLL and renamed to `*.wcx64`. Only the Unicode (`...W`)

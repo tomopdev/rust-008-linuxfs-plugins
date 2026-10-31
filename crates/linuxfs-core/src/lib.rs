@@ -5,11 +5,13 @@
 //! * [`btrfs`] – btrfs jen pro čtení nad crate `btrfs-disk` (podsvazky, komprese zlib / LZO / zstd),
 //! * [`ext`] – ext2 / ext3 / ext4 jen pro čtení nad crate `ext4-view`,
 //! * [`squashfs`] – SquashFS jen pro čtení nad crate `rust-fs-squashfs` (komprese gzip / xz / lzo / lz4 / zstd),
+//! * [`xfs`] – XFS jen pro čtení nad crate `rust-fs-xfs` (v4 i v5, nečistý žurnál se přehrává jen v paměti),
 //! * [`report`] – sběr chyb a upozornění při výpisu a rozbalování a jejich zápis do textového souboru,
 //! * [`lzo`] – dekodér LZO1X a rámování LZO, které používá btrfs,
 //! * [`volume`] – jednotný pohled na jeden svazek, adresace položek číslem,
 //! * [`util`] – převody jmen (očista pro Windows), časů a cest.
 
+pub(crate) mod blockdev;
 pub mod btrfs;
 pub mod detect;
 pub mod ext;
@@ -19,3 +21,4 @@ pub mod source;
 pub mod squashfs;
 pub mod util;
 pub mod volume;
+pub mod xfs;
