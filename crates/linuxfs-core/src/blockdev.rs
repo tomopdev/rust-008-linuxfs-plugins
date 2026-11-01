@@ -1,6 +1,6 @@
 //! Okno `[start, start + len)` zdroje ([`DiskSource`]) jako `BlockRead` z crate `rust-fs-core`.
 //!
-//! Společné pro čtečky postavené na crates od antimatter-studios (`rust-fs-squashfs`, `rust-fs-xfs`): ty čtou přes
+//! Společné pro čtečky postavené na crates od antimatter-studios (`rust-fs-squashfs`, `rust-fs-xfs`, `rust-fs-erofs`): ty čtou přes
 //! tento rys, takže každé čtení prochází cache zdroje zarovnanou na sektory a nikdy nevyjde mimo oddíl.
 
 use std::sync::{Arc, Mutex};

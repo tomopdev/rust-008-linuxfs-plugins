@@ -1,4 +1,4 @@
-//! Jednotný pohled na jeden svazek Linuxu (btrfs, ext2/3/4, squashfs, xfs), aby pluginy nemusely řešit, o který souborový systém jde.
+//! Jednotný pohled na jeden svazek Linuxu (btrfs, ext2/3/4, squashfs, xfs, erofs), aby pluginy nemusely řešit, o který souborový systém jde.
 //!
 //! Položky se adresují číslem ([`NodeId`]: strom + inode), ne cestou: názvy souborů v Linuxu jsou libovolné bajty
 //! a po převodu do Unicode (a po očistě pro Windows) by se podle nich položka nedala spolehlivě najít.
@@ -8,6 +8,7 @@ use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 
 use crate::btrfs::{BtrfsVolume, SubvolSelect};
+use crate::erofs::ErofsVolume;
 use crate::ext::ExtVolume;
 use crate::squashfs::SquashVolume;
 use crate::xfs::XfsVolume;
@@ -26,6 +27,7 @@ pub fn info_name_for(kind: FsKind) -> &'static str {
         FsKind::Ext4 => "!EXT4-INFO.txt",
         FsKind::Squashfs => "!SQUASHFS-INFO.txt",
         FsKind::Xfs => "!XFS-INFO.txt",
+        FsKind::Erofs => "!EROFS-INFO.txt",
     }
 }
 
@@ -115,6 +117,7 @@ enum Fs {
     Ext(Box<ExtVolume>),
     Squash(Box<SquashVolume>),
     Xfs(Box<XfsVolume>),
+    Erofs(Box<ErofsVolume>),
 }
 
 pub struct LinuxVolume {
@@ -140,6 +143,7 @@ impl LinuxVolume {
             Fs::Ext(v) => v.root(),
             Fs::Squash(v) => v.root(),
             Fs::Xfs(v) => v.root(),
+            Fs::Erofs(v) => v.root(),
         }
     }
 
@@ -165,6 +169,7 @@ impl LinuxVolume {
             Fs::Ext(v) => v.info_text(),
             Fs::Squash(v) => v.info_text(),
             Fs::Xfs(v) => v.info_text(),
+            Fs::Erofs(v) => v.info_text(),
         }
     }
 
@@ -184,6 +189,7 @@ impl LinuxVolume {
             Fs::Ext(v) => v.list_directory(dir)?,
             Fs::Squash(v) => v.list_directory(dir)?,
             Fs::Xfs(v) => v.list_directory(dir)?,
+            Fs::Erofs(v) => v.list_directory(dir)?,
         };
         if dir == self.root() {
             l.nodes.push(self.info_node());
@@ -203,6 +209,7 @@ impl LinuxVolume {
             Fs::Ext(v) => v.read_file_to(id, out),
             Fs::Squash(v) => v.read_file_to(id, out),
             Fs::Xfs(v) => v.read_file_to(id, out),
+            Fs::Erofs(v) => v.read_file_to(id, out),
         }
     }
 }
@@ -244,6 +251,15 @@ pub fn open_part(
             Ok(LinuxVolume {
                 kind: v.kind(),
                 fs: Fs::Xfs(Box::new(v)),
+                name,
+            })
+        }
+        FsKind::Erofs => {
+            let v = ErofsVolume::open(src, part.start, part.len)?;
+            let name = v.label().to_string();
+            Ok(LinuxVolume {
+                kind: v.kind(),
+                fs: Fs::Erofs(Box::new(v)),
                 name,
             })
         }

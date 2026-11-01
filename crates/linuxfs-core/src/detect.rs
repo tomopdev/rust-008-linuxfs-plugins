@@ -1,7 +1,7 @@
 //! Hledání svazků Linuxu uvnitř zdroje: holý svazek na začátku (obraz oddílu), GPT, MBR (včetně logických oddílů v rozšířeném
 //! oddílu) a textové soubory `.linuxfsdev`, které ukazují na surová zařízení (`\\.\PhysicalDrive2` a podobně).
 //!
-//! Hledá se btrfs, ext2/3/4, squashfs a xfs; další souborové systémy přibudou jako další varianty [`FsKind`].
+//! Hledá se btrfs, ext2/3/4, squashfs, xfs a erofs; další souborové systémy přibudou jako další varianty [`FsKind`].
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -18,6 +18,7 @@ pub enum FsKind {
     Ext4,
     Squashfs,
     Xfs,
+    Erofs,
 }
 
 impl FsKind {
@@ -29,6 +30,7 @@ impl FsKind {
             FsKind::Ext4 => "ext4",
             FsKind::Squashfs => "squashfs",
             FsKind::Xfs => "xfs",
+            FsKind::Erofs => "erofs",
         }
     }
 }
@@ -93,11 +95,19 @@ pub fn fs_at(src: &mut DiskSource, start: u64, len: u64, label: &str) -> Option<
             kind: FsKind::Squashfs,
         });
     }
-    crate::xfs::probe(src, start, len).then(|| Part {
+    if crate::xfs::probe(src, start, len) {
+        return Some(Part {
+            label: label.to_string(),
+            start,
+            len,
+            kind: FsKind::Xfs,
+        });
+    }
+    crate::erofs::probe(src, start, len).then(|| Part {
         label: label.to_string(),
         start,
         len,
-        kind: FsKind::Xfs,
+        kind: FsKind::Erofs,
     })
 }
 

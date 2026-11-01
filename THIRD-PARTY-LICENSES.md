@@ -11,6 +11,8 @@ Pro SquashFS se používá crate **`rust-fs-squashfs`** 0.4.0 (MIT, čistý Rust
 
 Pro XFS se používá crate **`rust-fs-xfs`** 0.14.2 (MIT, čistý Rust, nevendorovaný, stejný autor a stejná blokovou vrstva `rust-fs-core` jako `rust-fs-squashfs`); přibírá jen `crc32c` (kontrolní součty metadat v5). Crate umí i zápis a C ABI, projekt používá jen čtecí část.
 
+Pro EROFS se používá crate **`rust-fs-erofs`** 0.5.0 (MIT, čistý Rust, nevendorovaný, stejný autor a stejná blokovou vrstva `rust-fs-core` jako předchozí); přibírá `crc32c`, `flate2`, `lru`, `lz4_flex`, `lzma-rs` a `ruzstd` 0.8 (všechny už v projektu). Crate umí i zápis (mkfs) a C ABI, projekt používá jen čtecí část.
+
 Záměrně nepoužito: **ext4-lwext4 / ext4-lwext4-sys** (obalují C knihovnu lwext4, jejíž části jsou GPL-2.0 – s příznaky `gpl-*` by se
 výsledek stal GPL) a crates bez uvedené licence.
 
@@ -55,6 +57,7 @@ výsledek stal GPL) a crates bez uvedené licence.
 | quote | 1.0.47 | MIT OR Apache-2.0 | https://github.com/dtolnay/quote |
 | r-efi | 6.0.0 | MIT OR Apache-2.0 OR LGPL-2.1-or-later | https://github.com/r-efi/r-efi |
 | rust-fs-core | 0.3.17 | MIT | https://github.com/antimatter-studios/rust-fs-core |
+| rust-fs-erofs | 0.5.0 | MIT | https://github.com/antimatter-studios/rust-fs-erofs |
 | rust-fs-squashfs | 0.4.0 | MIT | https://github.com/antimatter-studios/rust-fs-squashfs |
 | rust-fs-xfs | 0.14.2 | MIT | https://github.com/antimatter-studios/rust-fs-xfs |
 | rust-lzo1x | 0.4.0 | MIT | https://github.com/antimatter-studios/rust-lzo1x |

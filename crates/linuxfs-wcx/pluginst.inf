@@ -1,5 +1,5 @@
 [plugininstall]
-description=LinuxFS: btrfs (subvolumes, zlib / LZO / zstd), ext2/3/4, SquashFS and XFS file systems on disk images, partitions and whole GPT / MBR disks (read-only); raw disks via .linuxfsdev
+description=LinuxFS: btrfs (subvolumes, zlib / LZO / zstd), ext2/3/4, SquashFS, XFS and EROFS file systems on disk images, partitions and whole GPT / MBR disks (read-only); raw disks via .linuxfsdev
 type=wcx
 file=linuxfs_wcx.wcx
 defaultdir=LinuxFsWcx

@@ -1,13 +1,13 @@
-# linuxfs-plugins – pluginy pro souborové manažery (Total Commander, Altap/Open Salamander) pro souborové systémy Linuxu: btrfs (podsvazky, komprese zlib/LZO/zstd) ext2/3/4, SquashFS a XFS, jen čtení.
+# linuxfs-plugins – pluginy pro souborové manažery (Total Commander, Altap/Open Salamander) pro souborové systémy Linuxu: btrfs (podsvazky, komprese zlib/LZO/zstd), ext2/3/4, SquashFS, XFS a EROFS, jen čtení.
 [workspace]
 resolver = "3"
 members = ["crates/linuxfs-core", "crates/linuxfs-wcx", "crates/linuxfs-spl"]
 exclude = ["vendor/btrfs-disk", "vendor/ext4-view"] # upstream crates s lokálními patchi (viz PATCHES.md v adresářích), nejsou členy workspace
 
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
-rust-version = "1.97"
+rust-version = "1.99"
 license = "MIT OR Apache-2.0"
 publish = false
 
@@ -19,7 +19,8 @@ ruzstd = "0.9"
 ext4-view = { path = "vendor/ext4-view", version = "=1.0.0", default-features = false } # ext2/3/4 jen pro čtení (MIT OR Apache-2.0, no_std, bez unsafe), s lokální opravou, viz vendor/ext4-view/PATCHES.md
 rust-fs-squashfs = { version = "=0.4.0", default-features = false } # SquashFS 4.0 jen pro čtení (MIT, čistý Rust; gzip / xz / lzo / lz4 / zstd)
 rust-fs-xfs = { version = "=0.14.2", default-features = false } # XFS v4 i v5 jen pro čtení (MIT, čistý Rust; nečistý žurnál se přehrává jen v paměti); crate je psaný i pro zápis a C ABI, používá se jen čtecí část
-rust-fs-core = "0.3" # BlockRead a Error, které rust-fs-squashfs používá (lib se jmenuje fs_core); verze musí odpovídat té, kterou si berou rust-fs-squashfs a rust-fs-xfs
+rust-fs-erofs = { version = "=0.5.0", default-features = false } # EROFS jen pro čtení (MIT, čistý Rust; komprese LZ4 / LZMA / DEFLATE / ZSTD, ztailpacking, fragmenty, chunkové soubory); crate umí i zápis (mkfs) a C ABI, používá se jen čtecí část (mkfs jen v testech)
+rust-fs-core = "0.3" # BlockRead a Error, které rust-fs-squashfs používá (lib se jmenuje fs_core); verze musí odpovídat té, kterou si berou rust-fs-squashfs, rust-fs-xfs a rust-fs-erofs
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_IO",

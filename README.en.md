@@ -2,7 +2,7 @@
 
 *[Česky](README.cs.md)*
 
-**Browse and extract Linux file systems (btrfs, ext2/3/4, SquashFS, XFS) in Total Commander and Altap/Open Salamander. Read-only, written in Rust.**
+**Browse and extract Linux file systems (btrfs, ext2/3/4, SquashFS, XFS, EROFS) in Total Commander and Altap/Open Salamander. Read-only, written in Rust.**
 
 ![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)
 ![rust](https://img.shields.io/badge/Rust-edition%202024-orange)
@@ -30,19 +30,21 @@ Both plugins share the same core (`linuxfs-core`), so they do the same.
 | | **ext2, ext3, ext4** | ✅ read-only | layer over the vendored `ext4-view` 1.0.0 (extents and indirect blocks, HTree, 64bit, `metadata_csum`); the kind is told from feature flags like the kernel does |
 | | **SquashFS** 4.0 | ✅ read-only | crate `rust-fs-squashfs` 0.4.0 (pure Rust, MIT) through an own adapter over `DiskSource`; **gzip, xz, lzo, lz4, zstd** compression (and legacy lzma), fragments, sparse files; items are addressed by inode reference |
 | | **XFS** v4 and v5 | ✅ read-only | crate `rust-fs-xfs` 0.14.2 (pure Rust, MIT) through an own adapter over `DiskSource`; v5 metadata checksums and identity are verified; `bigtime`, `reflink`, `rmapbt`, `finobt`, sparse inodes, all directory forms, B+tree extent maps; items are addressed by the real inode number; file data is read by an own extent reader (about 10x faster than the crate's block-by-block `read_at`) |
+| | **EROFS** | ✅ read-only | crate `rust-fs-erofs` 0.5.0 (pure Rust, MIT) through an own adapter over `DiskSource`; compact and extended inodes, uncompressed data, **LZ4 / LZMA / DEFLATE / ZSTD**, ztailpacking, fragments, dedupe, big_pcluster, chunk-based files with holes; items are addressed by inode number (NID); the superblock CRC32C is verified; images with extra devices (`--blobdev`), 48-bit addressing and "metabox" are refused with a message |
 | Compression (btrfs) | zlib, **zstd**, **LZO** | ✅ | zstd via `ruzstd`, zlib via `flate2`, LZO with an own safe decoder |
 | Subvolumes (btrfs) | subvolumes, nested subvolumes, snapshots | ✅ | the top level shows all subvolumes as folders; one can be selected (`subvol=`, `subvolid=`) |
 | Journal (ext3/4, XFS log) | not cleanly unmounted volume | ✅ in memory only | the journal / log is **never replayed on disk**, only mapped or replayed in memory; you see the state a mount would give after recovery |
 | Files | regular, sparse, prealloc, inline, reflinks, hard links | ✅ | sizes above 4 GiB verified |
 | | symbolic links | ✅ | shown as a small file containing the target |
 | | fifos, sockets, devices | hidden | meaningless on Windows |
-| Partitions | bare volume, **GPT** (512 and 4096 byte sectors), **MBR** (primary and logical) | ✅ | found automatically; several = folders `Partition N - name`; btrfs, ext, SquashFS and XFS can sit side by side on one disk |
+| Partitions | bare volume, **GPT** (512 and 4096 byte sectors), **MBR** (primary and logical) | ✅ | found automatically; several = folders `Partition N - name`; btrfs, ext, SquashFS, XFS and EROFS can sit side by side on one disk |
 | Source | image, physical disk / partition | ✅ | disks through a text file `.linuxfsdev` |
 
 Each volume has a virtual description file in its root: `!BTRFS-INFO.txt` (label, UUID, size, subvolume list, default subvolume) or
 `!EXT2-INFO.txt` / `!EXT3-INFO.txt` / `!EXT4-INFO.txt` (label, UUID, sizes, features, state, journal information) or
 `!SQUASHFS-INFO.txt` (compression, block size, inode count, creation time, image flags) or
-`!XFS-INFO.txt` (label, UUID, v4 / v5, sizes, allocation groups, features, log state).
+`!XFS-INFO.txt` (label, UUID, v4 / v5, sizes, allocation groups, features, log state),
+`!EROFS-INFO.txt` (label, UUID, block and image size, inode count, creation time, compressors, features).
 
 Linux file names are arbitrary bytes; the plugins map them to Windows-safe names (illegal characters and reserved names → `_`, invalid UTF-8
 replaced, case-insensitive collisions get ` (2)`); extraction always uses the original entry, not the mapped name.
@@ -69,7 +71,7 @@ shown / extracted, and at the end a summary is shown in a window while the **ful
 **Total Commander** – open `dist\linuxfs_wcx.zip` (it contains `pluginst.inf`) in TC and confirm. Associate extensions (`btrfs`, `ext4`, `squashfs`, `img`, `linuxfsdev`)
 in *Configuration → Options → Packer*. The plugin detects the format by content, so any file can be opened manually (**Ctrl+PgDn**).
 
-**Salamander** – copy `linuxfs.spl` to `plugins\linuxfs\` and add it in *Plugins → Plugins Manager*. Registered extensions: `btrfs;ext2;ext3;ext4;squashfs;sqfs;sfs;img;raw;dd;linuxfsdev`.
+**Salamander** – copy `linuxfs.spl` to `plugins\linuxfs\` and add it in *Plugins → Plugins Manager*. Registered extensions: `btrfs;ext2;ext3;ext4;squashfs;sqfs;sfs;xfs;erofs;img;raw;dd;linuxfsdev`.
 
 ## Usage
 
@@ -101,11 +103,11 @@ Requirements: Rust ≥ 1.97, `stable-x86_64-pc-windows-msvc`, Visual Studio Buil
 ```
 
 `cargo test --workspace --release` also runs on Linux/macOS. Fixtures can be regenerated with `tools/make-btrfs-fixtures.sh` (Linux, root, btrfs-progs), `tools/make-ext-fixtures.sh` (Linux, **no root needed**, e2fsprogs) and
-`tools/make-squashfs-fixtures.sh` (Linux, **no root needed**, squashfs-tools) and `tools/make-xfs-fixtures.sh` (Linux, root, xfsprogs; `mkfs.xfs` refuses images under 300 MB, they are sparse and about 2 MB gzipped; the tests unpack them sparsely).
+`tools/make-squashfs-fixtures.sh` (Linux, **no root needed**, squashfs-tools) and `tools/make-erofs-fixtures.sh` (Linux, erofs-utils >= 1.8; root only for the kernel cross-check) and `tools/make-xfs-fixtures.sh` (Linux, root, xfsprogs; `mkfs.xfs` refuses images under 300 MB, they are sparse and about 2 MB gzipped; the tests unpack them sparsely).
 
 ## Layout
 
-`crates/linuxfs-core` (source, detect, btrfs, ext, squashfs, xfs, lzo, volume, report), `crates/linuxfs-wcx`, `crates/linuxfs-spl`, `vendor/btrfs-disk` and `vendor/ext4-view`
+`crates/linuxfs-core` (source, detect, btrfs, ext, squashfs, xfs, erofs, lzo, volume, report), `crates/linuxfs-wcx`, `crates/linuxfs-spl`, `vendor/btrfs-disk` and `vendor/ext4-view`
 (patched upstream crates, see `PATCHES.md`), `tools/`, `build.ps1`.
 
 ## Tests
@@ -116,6 +118,7 @@ fast and slow symlinks, invalid UTF-8 in a name, a sparse file with holes in ind
 The SquashFS images (`squashfs-gzip`, `-xz`, `-zstd`, `-lz4`, `-lzo`) were made by `mksquashfs` from one source directory (different compression and block size from 4 KiB to 1 MiB, with and without fragments and export table;
 1500 files in a directory spanning several metadata blocks, 200 small files in fragments, a sparse file, a deep tree, symlinks, invalid UTF-8 in a name); the shared `squashfs.manifest` comes from the source.
 `squashfs-damaged` has a destroyed compressed data block of one file and the first directory metadata block, and checks that the rest is read and the errors are reported.
+The EROFS images (`erofs-plain`, `-plain-1k`, `-extended`, `-lz4`, `-lz4hc`, `-lzma`, `-deflate`, `-zstd`, `-chunked`) were made by `mkfs.erofs` 1.9 from one source directory (compact and extended inodes, 1 and 4 KiB blocks, ztailpacking, fragments, dedupe, chunk-based files with holes, 1500 files in a directory, 200 small files, a deep tree, hard links, symlinks, invalid UTF-8 in a name); every image passed `fsck.erofs`, and mounting it with the kernel (as root) showed exactly the source content; the shared `erofs.manifest` comes from the source. `erofs-damaged` has three destroyed inodes and a destroyed directory block, `erofs-damaged-lz4` a destroyed compressed stream of one file; the tests check that the rest is read and the errors are reported. Further tests check refusal of 48-bit / metabox / extra devices and a bad superblock checksum.
 The XFS images were made by `mkfs.xfs` and filled through a kernel mount, the manifests are what the kernel reports: `xfs-v5` (4 KiB blocks, reflink, rmapbt, bigtime, times before 1970 and after 2038, a file with 2500 extents = B+tree extent map, 3000 files in a directory, symlinks inline and in blocks, a preallocated file, a reflinked copy),
 `xfs-v5-small` (1 KiB blocks, 4 KiB directory blocks, no reflink / bigtime), `xfs-v4` (no checksums, no file type in directories, 256 B inodes, filled by `mkfs.xfs -p`; its mtime is not compared), `xfs-dirty` (a log with unapplied changes – rename, removal, new files – compared with the kernel's state after recovery; the test also checks that the image is not modified)
 and `xfs-damaged` (three destroyed inodes and a destroyed directory block; the rest must be read and the errors reported). `xfs_repair -n` verified every image.
@@ -134,6 +137,7 @@ The plugin tests run against mock hosts and also check the windows and the text 
 * **SquashFS:** version 4.0 only (older 1.x–3.x are not recognised); gzip, xz, lzo, lz4, zstd and legacy lzma (best effort only). The image has no data checksums, so damage is noticed only where decompression
   or a structure check fails; a truncated image does not open (with a message). `rust-fs-squashfs` is a young crate (0.4.0, one author); correctness is verified on `mksquashfs` images only (see Tests).
   A directory listing is decompressed as a whole, so a directory with a damaged metadata block is not listed at all (it is reported as an unreadable directory).
+* **EROFS:** refused with a message: images with extra devices (`--blobdev`, device table), 48-bit addressing, "metabox", unknown feature bits, non-zero `dirblkbits`, a bad superblock checksum. Compact inodes carry no modification time, so the image creation time is shown (as the kernel does). File data has no checksums. Compressed files are read block by block through the crate's pcluster cache: highly compressible data reads at tens of MB/s (about 50 MB/s measured for LZ4HC), uncompressed and incompressible data at hundreds of MB/s and more. `rust-fs-erofs` is a young crate (0.5.0, one author, October 2026); correctness was verified on images from `mkfs.erofs` 1.9 and on the Linux kernel's view of them (see Tests), images from other writers were not tried.
 * **XFS:** refused with a message: a log on a separate device, `needsrepair`, `metadir` and unknown feature bits, a volume with deleted-but-still-open files left by a crash (unlinked inodes: freeing them would be a write; mount it once in Linux or run `xfs_repair`), a dirty log with log-incompatible features. Files on a realtime device cannot be read (error for that file only). The log is replayed in memory only. Data has no checksums. A directory with a damaged block is not listed at all (reported as an unreadable directory). `rust-fs-xfs` is a young crate (0.14.x, one author); correctness is verified on kernel-made images only (see Tests). Newer kernels no longer mount v4 volumes by default, therefore the v4 image has no kernel manifest.
 * xattrs, ACLs and Linux permissions are not shown; times are mtime converted to UTC. Physical drives and MBR extended partitions were tested on images only.
 * `ext4-view` is an upstream 1.0 crate with local patches; two of them fix real problems (sparse files on ext2/3, listing aborted by a damaged block). They should be reported upstream;
@@ -190,4 +194,4 @@ see [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md). FrankenFS was not used b
 
 ## Acknowledgements
 
-The crates `btrfs-disk` (rustutils/btrfsutils), `ext4-view` (Nicholas Bishop, Google), `rust-fs-squashfs` and `rust-fs-xfs` (antimatter-studios), `ruzstd`, `flate2`, the btrfs and ext4 documentation (kernel.org) and the macfs-plugins project the plugin structure comes from.
+The crates `btrfs-disk` (rustutils/btrfsutils), `ext4-view` (Nicholas Bishop, Google), `rust-fs-squashfs`, `rust-fs-xfs` and `rust-fs-erofs` (antimatter-studios), `ruzstd`, `flate2`, the btrfs and ext4 documentation (kernel.org) and the macfs-plugins project the plugin structure comes from.

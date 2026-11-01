@@ -244,12 +244,13 @@ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "linuxfs-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "btrfs-disk",
  "ext4-view",
  "flate2",
  "rust-fs-core",
+ "rust-fs-erofs",
  "rust-fs-squashfs",
  "rust-fs-xfs",
  "ruzstd 0.9.1",
@@ -259,7 +260,7 @@ dependencies = [
 
 [[package]]
 name = "linuxfs-spl"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "flate2",
  "linuxfs-core",
@@ -269,7 +270,7 @@ dependencies = [
 
 [[package]]
 name = "linuxfs-wcx"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "flate2",
  "linuxfs-core",
@@ -353,6 +354,21 @@ name = "rust-fs-core"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c73c72ed61d0d97993e46d1e4e5df6cd6c21a4dc05085e3eb5887766e0a8e7fa"
+
+[[package]]
+name = "rust-fs-erofs"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57ede1329048caa6c36a2014c94bd0997a1365d0e50aff10f867f517e8560e27"
+dependencies = [
+ "crc32c",
+ "flate2",
+ "lru",
+ "lz4_flex",
+ "lzma-rs",
+ "rust-fs-core",
+ "ruzstd 0.8.3",
+]
 
 [[package]]
 name = "rust-fs-squashfs"

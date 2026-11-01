@@ -2,7 +2,7 @@
 
 *[English](README.en.md)*
 
-**Prohlížení a rozbalování linuxových souborových systémů (btrfs, ext2/3/4, SquashFS, XFS) v Total Commanderu a Altap/Open Salamanderu. Jen pro čtení, napsáno v Rustu.**
+**Prohlížení a rozbalování linuxových souborových systémů (btrfs, ext2/3/4, SquashFS, XFS, EROFS) v Total Commanderu a Altap/Open Salamanderu. Jen pro čtení, napsáno v Rustu.**
 
 ![license](https://img.shields.io/badge/licence-MIT%20OR%20Apache--2.0-blue)
 ![rust](https://img.shields.io/badge/Rust-edition%202024-orange)
@@ -46,19 +46,21 @@ Oba pluginy sdílejí stejné jádro (`linuxfs-core`), takže umí totéž.
 | | **ext2, ext3, ext4** | ✅ jen čtení | vrstva nad vendorovaným crate `ext4-view` 1.0.0 (extenty i nepřímé bloky, HTree, 64bit, `metadata_csum`); druh se pozná podle příznaků jako v jádře |
 | | **SquashFS** 4.0 | ✅ jen čtení | crate `rust-fs-squashfs` 0.4.0 (čistý Rust, MIT) přes vlastní adaptér nad `DiskSource`; komprese **gzip, xz, lzo, lz4, zstd** (i starý lzma), fragmenty, řídké soubory; položky se adresují odkazem na inode |
 | | **XFS** v4 i v5 | ✅ jen čtení | crate `rust-fs-xfs` 0.14.2 (čistý Rust, MIT) přes vlastní adaptér nad `DiskSource`; na v5 se ověřují kontrolní součty a identita metadat; `bigtime`, `reflink`, `rmapbt`, `finobt`, sparse inody, všechny tvary adresářů, B+strom extentů; položky se adresují skutečným číslem inode; data souborů čte vlastní čtečka po extentech (zhruba 10× rychlejší než blok po bloku v crate) |
+| | **EROFS** | ✅ jen čtení | crate `rust-fs-erofs` 0.5.0 (čistý Rust, MIT) přes vlastní adaptér nad `DiskSource`; compact i extended inody, data bez komprese, **LZ4 / LZMA / DEFLATE / ZSTD**, ztailpacking, fragmenty, dedupe, big_pcluster, chunkové soubory s dírami; položky se adresují číslem inode (NID); součet superbloku (CRC32C) se ověřuje; obrazy s dalšími zařízeními (`--blobdev`), 48bit a „metabox“ se odmítnou s hláškou |
 | Komprese (btrfs) | zlib, **zstd**, **LZO** | ✅ | zstd přes `ruzstd`, zlib přes `flate2`, LZO vlastní bezpečný dekodér |
 | Podsvazky (btrfs) | podsvazky, vnořené podsvazky, snapshoty | ✅ | top-level svazek se všemi podsvazky jako složkami; lze vybrat jen jeden (`subvol=`, `subvolid=`) |
 | Žurnál (ext3/4, log XFS) | nečistě odpojený svazek | ✅ jen v paměti | žurnál / log se **nepřehrává na disk**, jen se namapuje nebo přehraje v paměti; uvidíš stav, jaký by měl svazek po obnově |
 | Soubory | běžné, sparse (díry), prealloc, inline, reflink, hard linky | ✅ | velikosti nad 4 GiB ověřeny |
 | | symbolické odkazy | ✅ | zobrazí se jako malý soubor s cílem odkazu |
 | | fifo, sockety, zařízení | skryto | nemají ve Windows smysl |
-| Oddíly | holý svazek, **GPT** (sektor 512 i 4096), **MBR** (primární i logické) | ✅ | oddíly se najdou automaticky, víc oddílů = složky `Partition N - název`; v jednom disku mohou být btrfs, ext, SquashFS i XFS vedle sebe |
+| Oddíly | holý svazek, **GPT** (sektor 512 i 4096), **MBR** (primární i logické) | ✅ | oddíly se najdou automaticky, víc oddílů = složky `Partition N - název`; v jednom disku mohou být btrfs, ext, SquashFS, XFS i EROFS vedle sebe |
 | Zdroj | obraz, fyzický disk / oddíl | ✅ | disk přes textový soubor `.linuxfsdev` |
 
 Pro každý svazek je v kořeni virtuální soubor s popisem: `!BTRFS-INFO.txt` (označení, UUID, velikost, seznam podsvazků a výchozí podsvazek),
 resp. `!EXT2-INFO.txt` / `!EXT3-INFO.txt` / `!EXT4-INFO.txt` (označení, UUID, velikosti, příznaky, stav, informace o žurnálu),
 resp. `!SQUASHFS-INFO.txt` (komprese, velikost bloku, počet inodů, čas vytvoření, příznaky obrazu),
-resp. `!XFS-INFO.txt` (označení, UUID, v4 / v5, velikosti, alokační skupiny, vlastnosti, stav logu).
+resp. `!XFS-INFO.txt` (označení, UUID, v4 / v5, velikosti, alokační skupiny, vlastnosti, stav logu),
+resp. `!EROFS-INFO.txt` (označení, UUID, velikost bloku a obrazu, počet inodů, čas vytvoření, kompresory, příznaky).
 
 Jména souborů jsou v Linuxu libovolné bajty; pluginy je převádějí tak, aby je Windows přijal (nepovolené znaky a rezervovaná jména → `_`,
 neplatné UTF-8 se nahradí, shody bez ohledu na velikost písmen dostanou ` (2)`), rozbalování používá vždy původní položku, ne převedené jméno.
@@ -88,11 +90,11 @@ Přípony (např. `btrfs`, `ext4`, `squashfs`, `img`, `linuxfsdev`) se přiřad�
 Plugin pozná formát podle obsahu, takže jde ručně otevřít i soubor s jinou příponou (**Ctrl+PgDn**).
 
 **Salamander** – `linuxfs.spl` zkopíruj do složky `plugins\linuxfs\` a v *Plugins → Plugins Manager* ho přidej. Plugin se
-registruje na přípony `btrfs;ext2;ext3;ext4;squashfs;sqfs;sfs;img;raw;dd;linuxfsdev`.
+registruje na přípony `btrfs;ext2;ext3;ext4;squashfs;sqfs;sfs;xfs;erofs;img;raw;dd;linuxfsdev`.
 
 ## Použití
 
-* **Obraz nebo svazek**: dvojklik / Ctrl+PgDn na `.img`, `.raw`, `.btrfs`, `.ext4`, `.squashfs` / `.sqfs` … Při více oddílech (GPT/MBR) je každý ve vlastní složce.
+* **Obraz nebo svazek**: dvojklik / Ctrl+PgDn na `.img`, `.raw`, `.btrfs`, `.ext4`, `.squashfs` / `.sqfs`, `.erofs` … Při více oddílech (GPT/MBR) je každý ve vlastní složce.
 * **Skutečný disk či oddíl** (např. disk s Linuxem v USB adaptéru, nebo druhý disk v PC): textový soubor `linux.linuxfsdev`
 
   ```ini
@@ -127,7 +129,7 @@ Testy (`cargo test --workspace`) běží i v Linuxu/macOS; pluginy se sestavují
 
 | Cesta | Obsah |
 |---|---|
-| `crates/linuxfs-core` | společné jádro: zdroj dat s cache (`source`), detekce svazků a oddílů (`detect`), btrfs (`btrfs`), ext2/3/4 (`ext`), SquashFS (`squashfs`), XFS (`xfs`), LZO (`lzo`), jednotný pohled na svazek (`volume`), sběr chyb a zápis do souboru (`report`) |
+| `crates/linuxfs-core` | společné jádro: zdroj dat s cache (`source`), detekce svazků a oddílů (`detect`), btrfs (`btrfs`), ext2/3/4 (`ext`), SquashFS (`squashfs`), XFS (`xfs`), EROFS (`erofs`), LZO (`lzo`), jednotný pohled na svazek (`volume`), sběr chyb a zápis do souboru (`report`) |
 | `crates/linuxfs-wcx` | plugin Total Commanderu |
 | `crates/linuxfs-spl` | plugin Salamanderu |
 | `vendor/btrfs-disk` | upstream crate s lokálními úpravami (bez bindgenu/libclang, popsány v `PATCHES.md`), není členem workspace |
@@ -136,6 +138,7 @@ Testy (`cargo test --workspace`) běží i v Linuxu/macOS; pluginy se sestavují
 | `tools/make-ext-fixtures.sh` | skript (Linux, **bez roota**, `mke2fs -d`), který vyrobí obrazy ext2/3/4 a poškozený ext4 |
 | `tools/make-squashfs-fixtures.sh` | skript (Linux, **bez roota**, `mksquashfs` ze `squashfs-tools`), který vyrobí obrazy SquashFS s pěti kompresemi a poškozený obraz |
 | `tools/make-xfs-fixtures.sh` | skript (Linux, root, `xfsprogs`), který vyrobí obrazy XFS v5, v5 s malými bloky, v4, s nečistým logem a poškozený, a manifesty z jádra; `mkfs.xfs` nevyrobí obraz pod 300 MB, obrazy jsou řídké a po gzipu mají asi 2 MB, testy je rozbalují řídce |
+| `tools/make-erofs-fixtures.sh` | skript (Linux, `erofs-utils` >= 1.8, root jen pro kontrolu jádrem), který vyrobí obrazy EROFS (bez komprese compact / extended / 1 KiB bloky, LZ4, LZ4HC s fragmenty, LZMA, DEFLATE, ZSTD, chunkové) a dva poškozené; jako root je navíc připojí jádrem a porovná se zdrojem |
 | `build.ps1` | build a testy ve Windows |
 
 ## Jak to funguje
@@ -143,14 +146,14 @@ Testy (`cargo test --workspace`) běží i v Linuxu/macOS; pluginy se sestavují
 Soubor se otevře jako `DiskSource` (čtení po blocích 128 KiB s cache). `detect` v něm najde svazky (btrfs: superblok na 64 KiB, magic `_BHRfS_M`;
 ext: superblok na 1 KiB, magic `0xEF53` a kontrola rozumných hodnot) holé, v GPT nebo v MBR (včetně rozšířených oddílů). `BtrfsVolume` načte chunk tree
 (převod logických adres), prochází B-stromy a čte extenty; `ExtVolume` předá `ext4-view` čtečku nad oddílem. Položky se adresují dvojicí *(strom, inode)*
-(u ext je to číslo do tabulky cest, protože `ext4-view` adresuje cestou; u SquashFS je to přímo odkaz na inode, magie `hsqs` + kontrola verze a velikosti bloku); u XFS je to skutečné číslo inode, magie `XFSB` + kontrola velikostí bloku, sektoru a inodu a verze 4 / 5), ne jménem. Pluginy jsou na formátu nezávislé, jen překládají jednotné rozhraní
+(u ext je to číslo do tabulky cest, protože `ext4-view` adresuje cestou; u SquashFS je to přímo odkaz na inode, magie `hsqs` + kontrola verze a velikosti bloku); u XFS je to skutečné číslo inode, magie `XFSB` + kontrola velikostí bloku, sektoru a inodu a verze 4 / 5); u EROFS je to číslo inode (NID), magie `0xE0F5E1E2` na +1024 B + kontrola velikosti bloku), ne jménem. Pluginy jsou na formátu nezávislé, jen překládají jednotné rozhraní
 *vypiš složku / přečti soubor* na API Total Commanderu, resp. Salamanderu. Čtení je líné a souborová data se streamují.
 
 ## Testy
 
 ```bash
 cargo test --workspace --release
-# obrazy v tests/fixtures lze znovu vyrobit: tools/make-btrfs-fixtures.sh (root, btrfs-progs), tools/make-ext-fixtures.sh (e2fsprogs), tools/make-squashfs-fixtures.sh (squashfs-tools), tools/make-xfs-fixtures.sh (root, xfsprogs)
+# obrazy v tests/fixtures lze znovu vyrobit: tools/make-btrfs-fixtures.sh (root, btrfs-progs), tools/make-ext-fixtures.sh (e2fsprogs), tools/make-squashfs-fixtures.sh (squashfs-tools), tools/make-xfs-fixtures.sh (root, xfsprogs), tools/make-erofs-fixtures.sh (erofs-utils)
 ```
 
 Obrazy btrfs vytvořil skutečný Linux a každý soubor má v `*.manifest` velikost, čas a SHA-256 podle jádra; testy čtečku porovnávají s tímto manifestem
@@ -164,6 +167,7 @@ blok dat jednoho souboru a první metadatový blok adresářů a ověřuje, že 
 Obrazy XFS vyrobil `mkfs.xfs` a naplnilo je jádro přes mount, manifesty jsou to, co hlásí jádro: `xfs-v5` (4 KiB bloky, reflink, rmapbt, bigtime, časy před rokem 1970 a po roce 2038, soubor s 2500 extenty = B+strom extentů, 3000 souborů v adresáři, symlinky v inodu i v blocích, prealokovaný soubor, reflinkovaná kopie),
 `xfs-v5-small` (1 KiB bloky, adresářové bloky 4 KiB, bez reflink / bigtime), `xfs-v4` (bez kontrolních součtů, bez typu souboru v adresářích, inody 256 B, naplněný přes `mkfs.xfs -p`; jeho mtime se neporovnává), `xfs-dirty` (log s neprovedenými změnami – přejmenování, smazání, nové soubory – porovnaný se stavem, který po obnově hlásí jádro; test ověří i to, že se obraz nezmění)
 a `xfs-damaged` (tři zničené inody a zničený blok adresáře; zbytek se musí přečíst a chyby ohlásit). `xfs_repair -n` ověřil každý obraz.
+Obrazy EROFS (`erofs-plain`, `-plain-1k`, `-extended`, `-lz4`, `-lz4hc`, `-lzma`, `-deflate`, `-zstd`, `-chunked`) vyrobil `mkfs.erofs` 1.9 z jednoho zdrojového adresáře (compact i extended inody, bloky 1 a 4 KiB, ztailpacking, fragmenty, dedupe, chunkové soubory s dírami, 1500 souborů v adresáři přes víc bloků, 200 malých souborů, hluboký strom, hard linky, symlinky, neplatné UTF-8 ve jménu); každý obraz prošel `fsck.erofs` a připojení jádrem (jako root) ukázalo přesně obsah zdroje, společný `erofs.manifest` je ze zdroje. `erofs-damaged` má zničené tři inody a první blok adresáře, `erofs-damaged-lz4` zničený komprimovaný proud jednoho souboru; testy ověří, že se zbytek přečte a chyby se ohlásí. Testy dále ověřují odmítnutí 48bit / metabox / dalších zařízení a špatného součtu superbloku.
 Pluginové testy (`linuxfs-wcx`, `linuxfs-spl`) běží proti mock hostitelům a ověřují i okna a textové soubory s chybami.
 
 ## Omezení a neověřené věci
@@ -180,6 +184,7 @@ Pluginové testy (`linuxfs-wcx`, `linuxfs-spl`) běží proti mock hostitelům a
   kde selže dekomprese nebo kontrola struktur; zkrácený obraz se nepodaří otevřít (s hláškou). `rust-fs-squashfs` je mladý crate (0.4.0, jeden autor), správnost je ověřená jen na obrazech z `mksquashfs` (viz Testy).
   Adresáře se čtou celé najednou (listing se dekomprimuje celý), takže adresář s poškozeným metadatovým blokem se nevypíše vůbec (hlásí se jako nečitelný adresář).
 * **XFS:** odmítnuto s hláškou: log na samostatném zařízení, `needsrepair`, `metadir` a neznámé příznaky vlastností, svazek se smazanými, ale ještě otevřenými soubory po pádu (inody na seznamu unlinked: jejich uvolnění by byl zápis; stačí svazek jednou připojit v Linuxu nebo spustit `xfs_repair`), nečistý log s log-incompatible vlastnostmi. Soubory na realtime zařízení se nedají přečíst (chyba jen u nich). Log se přehrává jen v paměti. Data nemají kontrolní součty. Adresář s poškozeným blokem se nevypíše vůbec (hlásí se jako nečitelný adresář). `rust-fs-xfs` je mladý crate (0.14.x, jeden autor), správnost je ověřená jen na obrazech vyrobených jádrem (viz Testy). Nová jádra už svazky v4 výchozě nepřipojí, proto má obraz v4 manifest bez času z jádra.
+* **EROFS:** odmítnuto s hláškou: obraz s dalšími zařízeními (`--blobdev`, tabulka zařízení), 48bitové adresování, „metabox“, neznámé příznaky, nenulové `dirblkbits`, vadný součet superbloku. Compact inody nemají čas změny, ukáže se čas vytvoření obrazu (jako v jádře). Data nemají kontrolní součty. Komprimované soubory se čtou po blocích přes cache pclusterů crate: dobře komprimovatelná data zhruba desítky MB/s (v testu ≈ 50 MB/s u LZ4HC), nekomprimovaná i nekomprimovatelná data stovky MB/s a víc. `rust-fs-erofs` je mladý crate (0.5.0, jeden autor, od října 2026); správnost je ověřená na obrazech z `mkfs.erofs` 1.9 a jádrem Linuxu (viz Testy), obrazy z jiných generátorů nebyly zkoušeny.
 * Atributy `xattr`, ACL a práva Linuxu se nezobrazují; časy jsou čas změny (mtime) převedený na UTC.
 * Skutečný fyzický disk (`\\.\PhysicalDriveN`) a rozšíření MBR byly otestovány jen na obrazech.
 * `ext4-view` je upstream crate verze 1.0 s lokálními úpravami; dvě z nich jsou opravy skutečných problémů (řídké soubory na ext2/3, pád výpisu po poškozeném bloku).
@@ -254,4 +259,4 @@ Crate FrankenFS nebyl použit kvůli jeho licenčnímu dodatku vylučujícímu u
 
 ## Poděkování
 
-Crates `btrfs-disk` (projekt rustutils/btrfsutils), `ext4-view` (Nicholas Bishop, Google), `rust-fs-squashfs` a `rust-fs-xfs` (antimatter-studios), `ruzstd`, `flate2`, dokumentace btrfs a ext4 (kernel.org) a projekt macfs-plugins, ze kterého je převzata struktura pluginů.
+Crates `btrfs-disk` (projekt rustutils/btrfsutils), `ext4-view` (Nicholas Bishop, Google), `rust-fs-squashfs`, `rust-fs-xfs` a `rust-fs-erofs` (antimatter-studios), `ruzstd`, `flate2`, dokumentace btrfs a ext4 (kernel.org) a projekt macfs-plugins, ze kterého je převzata struktura pluginů.

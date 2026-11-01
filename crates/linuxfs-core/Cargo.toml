@@ -1,6 +1,6 @@
 [package]
 name = "linuxfs-core"
-description = "Společné jádro pluginů linuxfs-plugins: zdroj dat (obraz/disk), hledání svazků (holý svazek, GPT, MBR vč. logických oddílů), btrfs (podsvazky, komprese zlib/LZO/zstd), ext2/3/4, squashfs, xfs, hlášení chyb, jména a časy"
+description = "Společné jádro pluginů linuxfs-plugins: zdroj dat (obraz/disk), hledání svazků (holý svazek, GPT, MBR vč. logických oddílů), btrfs (podsvazky, komprese zlib/LZO/zstd), ext2/3/4, squashfs, xfs, erofs, hlášení chyb, jména a časy"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,6 +14,7 @@ ruzstd.workspace = true
 ext4-view.workspace = true
 rust-fs-squashfs.workspace = true
 rust-fs-xfs.workspace = true
+rust-fs-erofs.workspace = true
 rust-fs-core.workspace = true
 
 [target.'cfg(windows)'.dependencies]
